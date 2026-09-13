@@ -70,7 +70,13 @@ def load_config(path: str) -> dict:
                      ("client_id", "GODDARD_CLIENT_ID"),
                      ("client_secret", "GODDARD_CLIENT_SECRET"),
                      ("ntfy_topic", "GODDARD_NTFY_TOPIC"),
-                     ("ntfy_server", "GODDARD_NTFY_SERVER")):
+                     ("ntfy_server", "GODDARD_NTFY_SERVER"),
+                     ("gphotos_client_id", "GODDARD_GPHOTOS_CLIENT_ID"),
+                     ("gphotos_client_secret", "GODDARD_GPHOTOS_CLIENT_SECRET"),
+                     ("gphotos_refresh_token", "GODDARD_GPHOTOS_REFRESH_TOKEN"),
+                     ("gphotos_mode", "GODDARD_GPHOTOS_MODE"),
+                     ("gphotos_album", "GODDARD_GPHOTOS_ALBUM"),
+                     ("gphotos_album_id", "GODDARD_GPHOTOS_ALBUM_ID")):
         if os.environ.get(env):
             cfg[key] = os.environ[env]
     cfg.setdefault("client_id", DEFAULT_CLIENT_ID)
@@ -78,6 +84,8 @@ def load_config(path: str) -> dict:
     cfg.setdefault("output_dir", "~/Pictures/Goddard")
     cfg.setdefault("ntfy_server", "https://ntfy.sh")
     cfg.setdefault("ntfy_topic", None)
+    cfg.setdefault("gphotos_mode", "off")
+    cfg.setdefault("gphotos_album", "Goddard")
     return cfg
 
 
@@ -92,6 +100,18 @@ def save_config(path: str, cfg: dict) -> None:
     with open(path, "w") as f:
         json.dump(out, f, indent=2)
     os.chmod(path, 0o600)  # token lives here — keep it private
+
+
+def _import_gphotos():
+    """Lazily import the optional goddard_gphotos module. Kept out of the
+    top-level imports so `sync`/`login`/`status` keep working untouched if
+    that file is ever missing (e.g. an old checkout) — only the gphotos-*
+    commands and the upload pass inside `_run_sync` need it."""
+    try:
+        import goddard_gphotos
+        return goddard_gphotos
+    except ImportError:
+        return None
 
 
 # --- HTTP helpers ----------------------------------------------------------
@@ -581,18 +601,56 @@ def _run_sync(args, cfg, token, out_dir):
     _write_manifest(out_dir, state)
     _save_state_atomic(out_dir, state)
 
+    # --- Optional Google Photos upload pass -------------------------------
+    # Runs after the download/upgrade passes above have already completed
+    # and been saved, so an upload problem never takes away from — or blocks
+    # — the download part of the job.
+    gp_uploaded = 0
+    gp_note = ""
+    gp_auth_failed = False
+    if cfg.get("gphotos_mode", "off") != "off" and cfg.get("gphotos_refresh_token") \
+            and not args.no_upload:
+        gp = _import_gphotos()
+        if gp is None:
+            print("Warning: gphotos_mode is set but goddard_gphotos.py is missing "
+                  "— skipping upload.", file=sys.stderr)
+        else:
+            def _gp_checkpoint():
+                _save_state_atomic(out_dir, state)
+            try:
+                ures = gp.upload_pending(cfg, lambda c: save_config(args.config, c),
+                                         state, out_dir, _gp_checkpoint)
+                gp_uploaded = ures["uploaded"]
+                err += ures["failed"]
+                gp_note = f", {gp_uploaded} uploaded to Google Photos"
+                if ures["failed"]:
+                    gp_note += f" ({ures['failed']} upload failure(s))"
+                _save_state_atomic(out_dir, state)
+            except gp.AuthError:
+                gp_auth_failed = True
+                gp_note = ", Google Photos login expired"
+
     n_photos = sum(1 for e in state["items"].values() if e.get("type") == "image")
     n_videos = sum(1 for e in state["items"].values() if e.get("type") == "video")
     already = len(items) - len(new_items)
     n_unavail = sum(1 for e in state["items"].values() if e.get("rendition") == "unavailable")
     summary = (f"{ok} new, {upgraded} upgraded to full-res, {already} already present, "
-               f"{err} failed. Total in library: {n_photos} photos, {n_videos} videos"
+               f"{err} failed{gp_note}. Total in library: {n_photos} photos, {n_videos} videos"
                + (f" ({n_unavail} still archived upstream)." if n_unavail else "."))
     print("Sync complete:", summary)
+    if gp_auth_failed:
+        _notify(cfg, "Goddard: Google Photos login expired",
+                "Google Photos upload skipped — refresh token invalid or revoked. "
+                "Run `goddard_sync.py gphotos-login`.", priority="high")
     if err:
         _notify(cfg, f"Goddard sync: {err} failed", summary, priority="high")
-    elif ok or upgraded:
-        _notify(cfg, f"Goddard: {ok} new, {upgraded} upgraded", summary)
+    elif ok or upgraded or gp_uploaded:
+        title = f"Goddard: {ok} new, {upgraded} upgraded"
+        if gp_uploaded:
+            title += f", {gp_uploaded} uploaded"
+        _notify(cfg, title, summary)
+    if gp_auth_failed:
+        return 2
     return 1 if err else 0
 
 
@@ -638,7 +696,105 @@ def cmd_status(args):
     print(f"videos      : {videos}" + (f" ({unavail} item(s) archived upstream, not yet downloadable)" if unavail else ""))
     print(f"state file  : {_state_path(out_dir)} ({'exists' if existed else 'missing'})")
     print(f"ntfy topic  : {cfg.get('ntfy_topic') or '(disabled)'}")
+    gp = _import_gphotos()
+    if gp:
+        gpi = gp.status_summary(cfg, state, out_dir)
+        mode_line = gpi["mode"] + (f" (album: {gpi['album']})" if gpi["mode"] == "album" else "")
+        print(f"gphotos mode: {mode_line}")
+        print(f"gphotos login: {'yes' if gpi['logged_in'] else 'no — run gphotos-login'}")
+        print(f"gphotos pending: {gpi['pending']}")
     return 0
+
+
+# --- Google Photos commands --------------------------------------------------
+def cmd_gphotos_login(args):
+    gp = _import_gphotos()
+    if gp is None:
+        print("goddard_gphotos.py not found next to goddard_sync.py.", file=sys.stderr)
+        return 2
+    cfg = load_config(args.config)
+    if args.client_id:
+        cfg["gphotos_client_id"] = args.client_id
+    if args.client_secret:
+        cfg["gphotos_client_secret"] = args.client_secret
+    try:
+        gp.run_oauth_flow(cfg, lambda c: save_config(args.config, c),
+                          open_browser=not args.no_browser)
+    except gp.AuthError as e:
+        print(f"Login failed: {e}", file=sys.stderr)
+        return 2
+    print("Google Photos login successful.")
+    mode = cfg.get("gphotos_mode", "off")
+    if mode == "off":
+        print('gphotos_mode is "off" — set it to "library" or "album" in the config, '
+              'or pass --mode on `upload`, to actually enable uploads.')
+    else:
+        print(f"Current mode: {mode}")
+    return 0
+
+
+def cmd_albums(args):
+    gp = _import_gphotos()
+    if gp is None:
+        print("goddard_gphotos.py not found next to goddard_sync.py.", file=sys.stderr)
+        return 2
+    cfg = load_config(args.config)
+    try:
+        albums = gp.list_albums(cfg)
+    except gp.AuthError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+    if not albums:
+        print("No app-created albums yet. The Google Photos API can only see albums "
+              "this app itself created (not ones you made by hand in the app) — run "
+              "`upload --mode album` once to create one.")
+        return 0
+    print(f"{'TITLE':<30} {'ID':<45} ITEMS")
+    for a in albums:
+        print(f"{a.get('title', ''):<30} {a.get('id', ''):<45} {a.get('mediaItemsCount', '?')}")
+    print("\nPick one with `upload --album-id <ID>`, or set gphotos_album_id in the config.")
+    return 0
+
+
+def cmd_upload(args):
+    gp = _import_gphotos()
+    if gp is None:
+        print("goddard_gphotos.py not found next to goddard_sync.py.", file=sys.stderr)
+        return 2
+    cfg = load_config(args.config)
+    mode = args.mode or cfg.get("gphotos_mode", "off")
+    if mode == "off":
+        print('gphotos_mode is "off" and no --mode given — nothing to do.')
+        return 0
+    out_dir = os.path.expanduser(args.output_dir or cfg["output_dir"])
+    state, _ = _load_state(out_dir)
+
+    def _checkpoint():
+        _save_state_atomic(out_dir, state)
+
+    try:
+        result = gp.upload_pending(
+            cfg, lambda c: save_config(args.config, c), state, out_dir, _checkpoint,
+            mode=mode, album_title=args.album, album_id=args.album_id,
+            workers=args.workers, limit=args.limit, dry_run=args.dry_run)
+    except gp.AuthError as e:
+        print(str(e), file=sys.stderr)
+        return 2
+
+    if args.dry_run:
+        if mode == "album":
+            target = (f'album id {result["album_id"]}' if result["album_id"]
+                      else f'album "{args.album or cfg.get("gphotos_album", "Goddard")}" '
+                           '(will be looked up/created on a real run)')
+        else:
+            target = "your Google Photos library (no album)"
+        print(f"Would upload {result['candidates']} item(s) to {target}. No network calls made.")
+        return 0
+
+    _save_state_atomic(out_dir, state)
+    print(f"Uploaded {result['uploaded']}, failed {result['failed']} "
+          f"(of {result['candidates']} candidate(s)).")
+    return 1 if result["failed"] else 0
 
 
 def main(argv=None):
@@ -665,11 +821,38 @@ def main(argv=None):
     ps.add_argument("--workers", type=int, default=4, help="parallel downloads (default 4)")
     ps.add_argument("--quiet", action="store_true",
                     help="suppress per-100 progress lines (handy under systemd)")
+    ps.add_argument("--no-upload", action="store_true",
+                    help="skip the Google Photos upload pass even if gphotos_mode is enabled")
     ps.set_defaults(func=cmd_sync)
 
     pt = sub.add_parser("status", parents=[common],
                         help="show current configuration and photo count")
     pt.set_defaults(func=cmd_status)
+
+    pgl = sub.add_parser("gphotos-login", parents=[common],
+                         help="authorize this tool for Google Photos uploads")
+    pgl.add_argument("--client-id", help="Google OAuth client id (\"Desktop app\" type)")
+    pgl.add_argument("--client-secret", help="Google OAuth client secret")
+    pgl.add_argument("--no-browser", action="store_true",
+                     help="don't try to open a browser automatically; just print the URL")
+    pgl.set_defaults(func=cmd_gphotos_login)
+
+    pab = sub.add_parser("albums", parents=[common],
+                         help="list Google Photos albums this tool has created")
+    pab.set_defaults(func=cmd_albums)
+
+    pup = sub.add_parser("upload", parents=[common],
+                         help="upload downloaded photos/videos to Google Photos")
+    pup.add_argument("--mode", choices=["library", "album"],
+                     help="override gphotos_mode for this run")
+    pup.add_argument("--album", help="album title to use/create (mode \"album\")")
+    pup.add_argument("--album-id", help="upload straight into this album id (mode \"album\")")
+    pup.add_argument("--dry-run", action="store_true",
+                     help="show what would be uploaded; no network writes")
+    pup.add_argument("--limit", type=int, help="upload at most N items this run")
+    pup.add_argument("--workers", type=int, default=3, help="parallel byte uploads (default 3)")
+    pup.add_argument("--output-dir", help="override the configured output dir")
+    pup.set_defaults(func=cmd_upload)
 
     args = p.parse_args(argv)
     return args.func(args)
