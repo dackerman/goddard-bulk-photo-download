@@ -8,9 +8,12 @@ photos/
 *.jpg
 *.jpeg
 *.png
+*.heic
 *.mp4
 *.mov
+*.part
 manifest.csv
+.goddard-state.json
 
 # Python / editor cruft
 __pycache__/

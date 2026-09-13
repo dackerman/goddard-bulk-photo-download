@@ -1,9 +1,14 @@
 # Syncing videos and storyboards
 
-The main `sync` command downloads photos only. This note records exactly how to
-extend it to **videos** and **storyboards**, so nobody has to spin up an emulator
-again to rediscover it. Everything below was confirmed by calling the live API
-directly with a normal account bearer token (no app or emulator needed).
+**Videos are now implemented in `sync` itself** (`_download_video` in
+`goddard_sync.py`) — the section below is kept as design-notes/history for how
+that endpoint behaves, but you don't need to do anything extra to get videos;
+just run `sync`.
+
+**Storyboards are still not synced.** This note records exactly how you'd go
+about it, so nobody has to spin up an emulator again to rediscover it.
+Everything below was confirmed by calling the live API directly with a normal
+account bearer token (no app or emulator needed).
 
 Both features hang off one endpoint the app already uses:
 
@@ -59,33 +64,13 @@ That MP4 downloads with no auth, exactly like the photo originals. It even works
 for videos the classroom later deleted (`isClassroomDeleted: true`) — the file
 stays on the CDN.
 
-### Code sketch
+### Where this lives in the code
 
-```python
-def video_items(results):
-    for r in results:
-        if r.get("type") != "moment":
-            continue
-        for m in r.get("moments", []):
-            if m.get("type") == "video":
-                yield r.get("date", ""), m["_id"]
-
-def download_videos(token, out_dir):
-    results = fetch_feed(token)                       # already in goddard_sync.py
-    for date, moment_id in video_items(results):
-        d = _http(f"{API_BASE}/feed/details/moment/{moment_id}", token=token)
-        src = d.get("videoSource") or d.get("videoLowRendition")
-        if not src:
-            continue
-        url = CDN + src
-        path = os.path.join(out_dir, _filename(date, moment_id).replace(".jpg", ".mp4"))
-        # reuse the same retry/fallback download helper as photos
-        _http(url) -> write to path
-```
-
-To wire it into the CLI, add a `--videos` flag to `sync` (or a `sync-videos`
-subcommand) that runs this pass after the photo pass. `_http`, `fetch_feed`,
-`_filename`, `API_BASE`, and `CDN` already exist in `goddard_sync.py`.
+`_media_items` (in `goddard_sync.py`) collects video moments alongside images,
+and `_download_video` does exactly what's described above: calls the detail
+endpoint, reads `videoSource` (falling back to `videoLowRendition`), and
+downloads `CDN + videoSource` to `<canonical-name>.mp4` with rendition
+`"original"`. It runs in the same download pass and thread pool as photos.
 
 ### Caveats
 - Only one rendition is exposed (`videoSource` == `videoLowRendition`); there is
