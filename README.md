@@ -132,8 +132,11 @@ Set `ntfy_topic` (and optionally `ntfy_server`) to get a
 ## Limitations
 
 - **Photos only.** The feed also contains daily sheets, storyboards
-  (newsletters), and the occasional video; these are not downloaded. Videos use
-  a separate signed-URL flow that isn't implemented yet.
+  (newsletters), and the occasional video; these are not downloaded by `sync`.
+  Videos *are* fully recoverable via a separate detail endpoint, and storyboard
+  covers are too — see
+  [docs/SYNCING_VIDEOS_AND_STORYBOARDS.md](docs/SYNCING_VIDEOS_AND_STORYBOARDS.md)
+  for the exact method and code sketch if you want to add them.
 - **Older originals get archived.** Kaymbu lifecycles some full-resolution
   originals into AWS Glacier Deep Archive. Those return `403 InvalidObjectState`
   on download, so for them the tool saves the next-best `_display` rendition
