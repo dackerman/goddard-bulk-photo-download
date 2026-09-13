@@ -1,7 +1,12 @@
 {
   "username": "your-phone-or-email",
-  "output_dir": "~/Pictures/Goddard",
+  "output_dir": "~/Pictures/Goddard-{name}",
   "ntfy_server": "https://ntfy.sh",
   "ntfy_topic": null,
-  "gphotos_mode": "off"
+  "gphotos_mode": "off",
+  "gphotos_album": "Goddard School - {name}",
+  "per_student": true,
+  "students": {
+    "<studentId>": { "name": "Maya" }
+  }
 }

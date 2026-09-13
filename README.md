@@ -165,7 +165,7 @@ which takes precedence — handy for containers or CI.
 |-----------------|-------------------------|------------------------------------------------------|
 | `username`      | `GODDARD_USERNAME`      | Phone or email used to log in                         |
 | `token`         | `GODDARD_TOKEN`         | Bearer token (written by `login`)                     |
-| `output_dir`    | `GODDARD_OUTPUT_DIR`    | Where photos are saved (default `~/Pictures/Goddard`) |
+| `output_dir`    | `GODDARD_OUTPUT_DIR`    | Where photos are saved (default `~/Pictures/Goddard`); may contain `{name}` — see [Multiple children](#multiple-children) |
 | `ntfy_topic`    | `GODDARD_NTFY_TOPIC`    | If set, a push notification is sent after new photos  |
 | `ntfy_server`   | `GODDARD_NTFY_SERVER`   | ntfy server (default `https://ntfy.sh`)               |
 | `client_id`     | `GODDARD_CLIENT_ID`     | App OAuth client id (sensible default built in)       |
@@ -174,8 +174,10 @@ which takes precedence — handy for containers or CI.
 | `gphotos_client_secret` | `GODDARD_GPHOTOS_CLIENT_SECRET` | Your Google Cloud OAuth client secret (written by `gphotos-login`) |
 | `gphotos_refresh_token` | `GODDARD_GPHOTOS_REFRESH_TOKEN` | Long-lived token (written by `gphotos-login`)          |
 | `gphotos_mode`          | `GODDARD_GPHOTOS_MODE`          | `off` (default) / `library` / `album` — see below      |
-| `gphotos_album`         | `GODDARD_GPHOTOS_ALBUM`         | Album title for mode `album` (default `Goddard`)       |
-| `gphotos_album_id`      | `GODDARD_GPHOTOS_ALBUM_ID`      | Cached id of the app-created album (resolved automatically) |
+| `gphotos_album`         | `GODDARD_GPHOTOS_ALBUM`         | Album title for mode `album` (default `Goddard`); may contain `{name}` — see [Multiple children](#multiple-children) |
+| `gphotos_album_id`      | `GODDARD_GPHOTOS_ALBUM_ID`      | Cached id of the app-created album (resolved automatically); ignored in per-student mode |
+| `per_student`           | `GODDARD_PER_STUDENT`           | `false` (default) / `true` — route each child to its own folder/album, see [Multiple children](#multiple-children) |
+| `students`              | —                                | Optional per-child overrides (`name`, `output_dir`, `gphotos_album`, `gphotos_album_id`), keyed by student id |
 
 ### Push notifications
 
@@ -196,6 +198,62 @@ Set `ntfy_topic` (and optionally `ntfy_server`) to get a
 `sync`'s exit code reflects the same thing: `2` for an auth problem
 (re-run `login`), `1` if anything failed to download, `0` otherwise — useful
 for alerting from systemd/cron on its own even without ntfy configured.
+
+## Multiple children
+
+Every feed result is tagged with `studentIds` — normally the one child it's
+of, but a photo of two siblings can carry both ids, and some posts (e.g. a
+classroom-wide announcement) carry none. Set `"per_student": true` to route
+each child to its own folder and its own Google Photos album instead of
+mixing everyone into one library:
+
+```json
+{ "per_student": true,
+  "output_dir": "~/Pictures/Goddard-{name}",
+  "gphotos_album": "Goddard School - {name}" }
+```
+
+- **`output_dir`/`gphotos_album` templates.** Either may contain a `{name}`
+  placeholder, filled in per child (`~/Pictures/Goddard-{name}` ->
+  `~/Pictures/Goddard-Maya`, `~/Pictures/Goddard-Max`). If you turn on
+  `per_student` but forget the placeholder, `-{name}` (folder) or `
+  - {name}` (album) is appended automatically so two children's libraries
+  can never collide.
+- **A new child needs zero setup.** The first time a sibling's student id
+  shows up in the feed, it gets its own folder/album automatically — named
+  from a daily sheet's possessive label (e.g. "Maya's" -> `Maya`) if one has
+  posted yet, else a stable `student-<id suffix>` placeholder until it does.
+  Nothing needs to be configured by hand for the tool to keep working the
+  day a second child joins the account.
+- **`students` overrides** let you rename a child (moment posts never carry
+  a name — only a daily sheet's `studentLabel` does — so the fallback name
+  isn't always pretty) or point one at a custom folder/album:
+  ```json
+  { "students": { "<studentId>": { "name": "Max",
+                                    "output_dir": "~/Pictures/Max-Goddard",
+                                    "gphotos_album": "Max at Goddard" } } }
+  ```
+  Every key is optional. Find a child's id with `./goddard_sync.py students`.
+- **A post tagged with both kids** (e.g. a photo of two siblings together)
+  is downloaded into *both* children's folders — dedup is per folder, so
+  that's not a duplicate within either library. A post tagged with no
+  student at all goes to every child.
+- **One notification per run**, not one per child: a single ntfy titled
+  e.g. `Goddard: Maya 3 new, Max 12 new` (a child with nothing new is
+  omitted from the title), and `sync`'s exit code is the worst across
+  children.
+- **`upload --student NAME_OR_ID`** restricts a manual upload to one child
+  (by resolved name or by id); `--album`/`--album-id` are only accepted
+  together with `--student` (otherwise it's ambiguous which child's album
+  they mean).
+- **`status`** shows a section per child (folder, photo/video counts,
+  gphotos album, pending uploads) in per-student mode, in addition to the
+  usual shared lines.
+- **`./goddard_sync.py students`** prints a table of every child seen in the
+  feed — id, resolved name, where the name came from (config / daily sheet /
+  fallback), post count, resolved folder and album, and whether the folder
+  exists yet — handy for checking a new child resolved the way you expect
+  before (or after) turning `per_student` on.
 
 ## Google Photos upload (optional)
 
@@ -349,7 +407,12 @@ selection, batching at 50 items, state marking (including partial batch
 failures), album resolution (cached/found/created), 401-triggered token
 refresh, and that `--dry-run` performs no network calls or writes — with
 `goddard_gphotos.request` (the module's sole HTTP entry point) mocked
-throughout. No network access required for any test.
+throughout. `tests/test_students.py` covers per-student routing — name
+derivation and sanitization, `{name}` template formatting (including the
+auto-appended suffix), grouping posts by student id, per-child album-id
+caching, `upload --student`, the combined per-run exit code/notification, and
+an end-to-end synthetic two-student sync. No network access required for any
+test.
 
 ## License
 
