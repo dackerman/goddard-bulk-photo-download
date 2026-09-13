@@ -387,6 +387,14 @@ it clearly (exit code `2`, and — for `sync` — a high-priority ntfy titled
   `sync`'s upgrade pass revisits every non-full-res item on each run and
   swaps in the original automatically once/if it becomes fetchable again, with
   no need to re-run anything manually.
+- **Recovering archived originals from an export.** If you ever saved photos
+  one at a time from the Goddard app (e.g. into a Google Photos album), those
+  saves were the full-resolution originals. `tools/import_from_export.py
+  <album.zip|dir> <library dir> --apply` matches an export against the
+  library by EXIF capture time and perceptual hash and swaps in any file
+  that is meaningfully larger than what's on disk; the next `upload`/`sync`
+  re-uploads those. It needs Pillow and pillow-heif (the core tool stays
+  stdlib-only); run it without `--apply` first to see the plan.
 - **Draft graphics** (newsletter/invitation art) have no full-resolution
   original, so the medium `_display` rendition is saved for those, and they're
   never included in the upgrade pass.
