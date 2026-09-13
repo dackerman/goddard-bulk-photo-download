@@ -376,3 +376,31 @@ class TestEndToEndPerStudentSync(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestUploadStudentDefaultAlbum(unittest.TestCase):
+    """upload --student NAME without --album must use that child's resolved
+    album title, not fall through to the raw {name} template."""
+    def test_uses_child_album_when_no_album_flag(self):
+        import tempfile, types
+        d = tempfile.mkdtemp()
+        cfg = {"per_student": True, "token": "t", "output_dir": os.path.join(d, "G-{name}"),
+               "gphotos_album": "School - {name}", "gphotos_mode": "album",
+               "gphotos_refresh_token": "r", "gphotos_client_id": "c", "gphotos_client_secret": "s"}
+        results = [{"type": "dailysheet", "studentIds": ["sid1"], "studentLabel": "Maya's"}]
+        seen = {}
+        class FakeGP:
+            AuthError = Exception
+            def upload_pending(self, cfg, save_cfg, state, out_dir, checkpoint, **kw):
+                seen.update(kw)
+                return {"uploaded": 0, "failed": 0, "album_id": None, "candidates": 0}
+        orig_fetch, orig_load = gs.fetch_feed, gs.load_config
+        gs.fetch_feed = lambda tok: results
+        gs.load_config = lambda p: dict(cfg)
+        try:
+            args = types.SimpleNamespace(config="x", student="Maya", album=None, album_id=None,
+                                         output_dir=None, workers=1, limit=None, dry_run=True, mode="album")
+            gs._upload_per_student(args, dict(cfg), FakeGP(), "album")
+        finally:
+            gs.fetch_feed, gs.load_config = orig_fetch, orig_load
+        self.assertEqual(seen.get("album_title"), "School - Maya")

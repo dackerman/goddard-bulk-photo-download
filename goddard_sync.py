@@ -1121,7 +1121,7 @@ def _upload_per_student(args, cfg, gp, mode):
         def _checkpoint(_out_dir=out_dir, _state=state):
             _save_state_atomic(_out_dir, _state)
 
-        album_title = args.album if args.student else c["album_title"]
+        album_title = (args.album if args.student and args.album else c["album_title"])
         try:
             result = gp.upload_pending(
                 cfg, lambda cc: save_config(args.config, cc), state, out_dir, _checkpoint,
