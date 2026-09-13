@@ -197,15 +197,17 @@ def run_oauth_flow(cfg, save_cfg, open_browser=True):
               "scope": SCOPES, "state": state}
     url = AUTH_URL + "?" + urllib.parse.urlencode(params)
 
+    # flush=True: when stdout is a pipe/file (e.g. run under nohup or a
+    # wrapper), block buffering would otherwise hide the URL until exit.
     print("Open this URL to authorize Google Photos access (or it should open "
-          "automatically in your browser):")
-    print(url)
+          "automatically in your browser):", flush=True)
+    print(url, flush=True)
     if open_browser:
         try:
             webbrowser.open(url)
         except Exception:
             pass
-    print("Waiting for sign-in to complete ...")
+    print("Waiting for sign-in to complete ...", flush=True)
     while server.oauth_result is None:
         server.handle_request()  # blocks for exactly one HTTP request
     server.server_close()
