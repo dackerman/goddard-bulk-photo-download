@@ -165,7 +165,7 @@ class _OAuthHandler(http.server.BaseHTTPRequestHandler):
             self.server.oauth_result = qs  # ignore stray requests (e.g. favicon)
         ok = "code" in qs
         self.send_response(200)
-        self.send_header("Content-Type", "text/html")
+        self.send_header("Content-Type", "text/html; charset=utf-8")
         self.end_headers()
         msg = ("Signed in — you can close this tab and return to the terminal."
                if ok else "Google Photos sign-in failed — check the terminal.")
