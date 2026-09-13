@@ -231,37 +231,49 @@ hand (it's easy to spot — same photo, smaller/blurrier).
 
 ### Setup (Google Cloud side)
 
-You need your own Google OAuth client — this is a one-time, few-minutes
-setup in a browser:
+You need your own Google OAuth client — a one-time browser setup, about ten
+minutes. Google reorganized this UI in 2025 under "Google Auth Platform", so
+older guides will show different page names.
 
-1. Go to the [Google Cloud Console](https://console.cloud.google.com/) and
-   create a new project (or pick an existing one you're happy to use for
-   this).
-2. **APIs & Services → Library** — search for and enable the
-   **Google Photos Library API**.
-3. **APIs & Services → OAuth consent screen** — configure it:
-   - User type: **External**.
-   - Fill in the required app name/support email fields (anything
-     reasonable — only you will ever see this screen).
-   - Under **Test users**, add your own Google account's email address.
-4. **APIs & Services → Credentials → Create Credentials → OAuth client ID**
-   — application type **Desktop app**. Give it any name.
-5. Copy the generated **Client ID** and **Client Secret**.
+1. In the [Google Cloud Console](https://console.cloud.google.com/), create a
+   new project (e.g. `goddard-photo-sync`). A dedicated project is easier
+   than reusing one: its consent screen has to be *published* (step 4), and
+   that is a per-project switch.
+2. **APIs & Services → Library** — enable the **Google Photos Library API**.
+3. **Google Auth Platform → Overview → Get started** — app name, your email
+   as support address, audience **External**, contact email, accept the User
+   Data Policy. Then on the **Branding** page also fill in an *Application
+   home page*, an *Application privacy policy link* (any site you own is
+   fine; it is only ever shown to you) and add that site under *Authorized
+   domains*. Save. Without those three fields the Publish button in the next
+   step stays disabled with a misleading "complete your Branding" message.
+4. **Audience → Publish app → Confirm.** This is important: while the app is
+   in **Testing** status Google expires refresh tokens after 7 days, which
+   silently breaks a daily job. In **Production** they last indefinitely. No
+   verification is needed for personal use; you just click through a
+   "Google hasn't verified this app" warning once during login.
+5. **Clients → Create client** — application type **Desktop app**, any name.
+   Copy the **Client ID** and **Client secret** from the dialog, or use its
+   *Download JSON* button. The secret is shown **only once**; if you lose
+   it, open the client and use *Add secret* to generate a new one (then
+   disable and delete the old one).
 6. Run the login flow:
 
    ```bash
    ./goddard_sync.py gphotos-login --client-id "<id>" --client-secret "<secret>"
    ```
 
-   This opens your browser to Google's consent screen (or prints a URL to
-   open manually if you pass `--no-browser`, e.g. over SSH). Sign in, approve
-   the requested Photos permissions, and the tool stores a refresh token in
-   your config file.
+   This opens your browser (or prints a URL with `--no-browser`, e.g. over
+   SSH — the redirect still has to land on the machine running the command).
+   Pick your account, click *Advanced → Go to Goddard Photo Sync* on the
+   unverified-app warning, tick both permissions, Continue. The tool stores
+   the resulting refresh token in your config file. The client id/secret can
+   also be supplied via `GODDARD_GPHOTOS_CLIENT_ID` / `_SECRET` env vars.
 7. Set a mode and upload:
 
    ```bash
    # edit ~/.config/goddard-photo-sync/config.json:
-   #   "gphotos_mode": "library"   (or "album")
+   #   "gphotos_mode": "library"   (or "album", with "gphotos_album": "Maya")
 
    ./goddard_sync.py upload --dry-run   # see what would be uploaded first
    ./goddard_sync.py upload
@@ -269,16 +281,6 @@ setup in a browser:
 
    From then on, every `sync` run also uploads anything new (unless you pass
    `sync --no-upload`).
-
-**Important — "Testing" vs. "In production":** while your OAuth consent
-screen is in **Testing** publishing status, Google expires refresh tokens
-after **7 days**, which will silently break a daily scheduled sync. For a
-tool you run unattended, go to **OAuth consent screen** in the Cloud Console
-and click **Publish App** to move it to **In production**. For a personal
-tool like this you do *not* need Google's verification review — you'll see
-an "unverified app" warning the next time you `gphotos-login`, just click
-through it (Advanced → Go to \<app name\> (unsafe)); it's your own app,
-requesting access to your own account.
 
 ### Other commands
 
