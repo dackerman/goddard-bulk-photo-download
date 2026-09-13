@@ -56,7 +56,16 @@ def probe(fp):
     except Exception:
         pass
     dto = dto or ex.get(ExifTags.Base.DateTime)
-    return {"w": img.size[0], "h": img.size[1], "dto": dto, "dhash": dhash(img)}
+    # Hash all four rotations: an export may have been physically rotated
+    # (orientation baked in) relative to the copy in the library.
+    hashes = [dhash(img.rotate(rot, expand=True)) if rot else dhash(img) for rot in (0, 90, 180, 270)]
+    return {"w": img.size[0], "h": img.size[1], "dto": dto, "dhash": hashes[0], "hashes": hashes}
+
+
+def dist(z, r):
+    """Smallest dHash distance between an export probe (any rotation) and a
+    library probe."""
+    return min(ham(h, r["dhash"]) for h in z["hashes"])
 
 
 def iter_export(src):
@@ -110,12 +119,12 @@ def main(argv):
         hit = None
         cands = by_dto.get(z["dto"], []) if z["dto"] else []
         if cands:
-            c = min(cands, key=lambda r: ham(r["dhash"], z["dhash"]))
-            if ham(c["dhash"], z["dhash"]) <= 16:
+            c = min(cands, key=lambda r: dist(z, r))
+            if dist(z, c) <= 16:
                 hit = c
         if hit is None:
-            c = min(local, key=lambda r: ham(r["dhash"], z["dhash"]))
-            if ham(c["dhash"], z["dhash"]) <= 5:
+            c = min(local, key=lambda r: dist(z, r))
+            if dist(z, c) <= 5:
                 hit = c
         if hit is None:
             unmatched.append((name, f"no match (dto={z['dto']}, {z['w']}x{z['h']})")); continue
