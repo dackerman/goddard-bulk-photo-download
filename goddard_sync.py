@@ -421,14 +421,23 @@ def cmd_sync(args):
     os.makedirs(out_dir, exist_ok=True)
 
     try:
-        results = fetch_feed(token)
+        return _run_sync(args, cfg, token, out_dir)
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
             print("Token rejected (expired?). Re-run `goddard_sync.py login`.",
                   file=sys.stderr)
+            _notify(cfg, "Goddard sync FAILED", f"Token rejected ({e.code}) fetching "
+                    "the feed. Re-run `goddard_sync.py login`.", priority="high")
             return 2
+        _notify(cfg, "Goddard sync FAILED", f"Unexpected HTTP error: {e}", priority="high")
+        raise
+    except Exception as e:
+        _notify(cfg, "Goddard sync FAILED", f"Unexpected error: {e}", priority="high")
         raise
 
+
+def _run_sync(args, cfg, token, out_dir):
+    results = fetch_feed(token)
     items = _image_items(results)
     state, existed = _load_state(out_dir)
 
@@ -471,7 +480,7 @@ def cmd_sync(args):
                 _checkpoint()
             else:
                 err += 1
-            if i % 100 == 0 or i == len(new_items):
+            if not args.quiet and (i % 100 == 0 or i == len(new_items)):
                 print(f"  new {i}/{len(new_items)}  ok={ok} failed={err}", flush=True)
 
         # Upgrade pass: revisit anything not already known to be full-res
@@ -498,7 +507,7 @@ def cmd_sync(args):
             elif kind == "err":
                 err += 1
             # "skip" (still 403/404): leave rendition as-is, retried next run.
-            if i % 100 == 0 or i == len(upgrade_targets):
+            if not args.quiet and (i % 100 == 0 or i == len(upgrade_targets)):
                 print(f"  upgrade {i}/{len(upgrade_targets)}  upgraded={upgraded}", flush=True)
 
     _write_manifest(out_dir, state)
@@ -509,9 +518,11 @@ def cmd_sync(args):
     summary = (f"{ok} new, {upgraded} upgraded to full-res, {already} already present, "
                f"{err} failed. Total in library: {n_photos} photos.")
     print("Sync complete:", summary)
-    if (ok or upgraded) and cfg.get("ntfy_topic"):
+    if err:
+        _notify(cfg, f"Goddard sync: {err} failed", summary, priority="high")
+    elif ok or upgraded:
         _notify(cfg, f"Goddard: {ok} new, {upgraded} upgraded", summary)
-    return 1 if err and not ok else 0
+    return 1 if err else 0
 
 
 def _write_manifest(out_dir, state):
@@ -524,11 +535,15 @@ def _write_manifest(out_dir, state):
                         e.get("rendition", ""), e.get("caption", "")])
 
 
-def _notify(cfg, title, message):
+def _notify(cfg, title, message, priority=None):
+    if not cfg.get("ntfy_topic"):
+        return
     try:
         url = cfg["ntfy_server"].rstrip("/") + "/" + cfg["ntfy_topic"]
-        req = urllib.request.Request(url, data=message.encode(),
-                                     headers={"Title": title, "User-Agent": USER_AGENT})
+        headers = {"Title": title, "User-Agent": USER_AGENT}
+        if priority:
+            headers["Priority"] = priority
+        req = urllib.request.Request(url, data=message.encode(), headers=headers)
         urllib.request.urlopen(req, timeout=15)
     except Exception as e:
         print("(ntfy notification failed:", e, ")", file=sys.stderr)
@@ -574,6 +589,8 @@ def main(argv=None):
                         help="download any new full-resolution photos")
     ps.add_argument("--output-dir", help="override the configured output dir")
     ps.add_argument("--workers", type=int, default=4, help="parallel downloads (default 4)")
+    ps.add_argument("--quiet", action="store_true",
+                    help="suppress per-100 progress lines (handy under systemd)")
     ps.set_defaults(func=cmd_sync)
 
     pt = sub.add_parser("status", parents=[common],
