@@ -273,32 +273,41 @@ def list_albums(cfg):
     return _list_albums(cfg, _Cache())
 
 
-def resolve_album(cfg, cache, save_cfg, title=None, album_id=None, allow_network=True):
+def resolve_album(cfg, cache, save_cfg, title=None, album_id=None, allow_network=True,
+                   cache_get=None, cache_set=None):
     """Return the album id to upload into for mode "album", in priority
-    order: an explicit `album_id` > `gphotos_album_id` already cached in
-    config > an existing app-created album with the wanted title > a newly
-    created one. Any time a lookup/create actually happens, the result is
-    cached into `cfg["gphotos_album_id"]` and persisted via `save_cfg` so
-    later runs skip straight to the cached id.
+    order: an explicit `album_id` > the cached id > an existing app-created
+    album with the wanted title > a newly created one. Any time a
+    lookup/create actually happens, the result is cached and persisted via
+    `save_cfg` so later runs skip straight to the cached id.
+
+    The cache defaults to `cfg["gphotos_album_id"]` (unchanged single-library
+    behaviour). Pass `cache_get`/`cache_set` (no-arg / one-arg callables) to
+    target a different slot instead — e.g. per-student sync stores each
+    child's album id at `cfg["students"][sid]["gphotos_album_id"]` so the
+    top-level key is never touched in that mode.
 
     With `allow_network=False` (dry-run), only the first two — free —
     options are tried; if neither applies this returns None rather than
     making any API call, so dry-run performs zero requests and zero writes.
     """
+    get = cache_get or (lambda: cfg.get("gphotos_album_id"))
+    set_ = cache_set or (lambda aid: cfg.__setitem__("gphotos_album_id", aid))
     if album_id:
         return album_id
-    if cfg.get("gphotos_album_id"):
-        return cfg["gphotos_album_id"]
+    cached = get()
+    if cached:
+        return cached
     if not allow_network:
         return None
     title = title or cfg.get("gphotos_album") or DEFAULT_ALBUM_TITLE
     for a in _list_albums(cfg, cache):
         if a.get("title") == title:
-            cfg["gphotos_album_id"] = a["id"]
+            set_(a["id"])
             save_cfg(cfg)
             return a["id"]
     created = _create_album(cfg, cache, title)
-    cfg["gphotos_album_id"] = created["id"]
+    set_(created["id"])
     save_cfg(cfg)
     return created["id"]
 
@@ -350,7 +359,8 @@ def _batch_create(cfg, cache, new_media_items, album_id=None):
 
 
 def upload_pending(cfg, save_cfg, state, out_dir, checkpoint, mode=None,
-                    album_title=None, album_id=None, workers=3, limit=None, dry_run=False):
+                    album_title=None, album_id=None, workers=3, limit=None, dry_run=False,
+                    cache_get=None, cache_set=None):
     """Upload every pending item (see `pending_items`) to Google Photos.
     Mutates `state` in place (adding/replacing each uploaded item's
     "gphotos" key) and calls `checkpoint()` after every batch of up to
@@ -358,7 +368,9 @@ def upload_pending(cfg, save_cfg, state, out_dir, checkpoint, mode=None,
     in a thread pool of `workers`; each batchCreate call happens on the
     calling thread. `limit` caps how many candidates are considered (handy
     for a first cautious run). `dry_run=True` performs zero network calls
-    and zero writes.
+    and zero writes. `cache_get`/`cache_set` are forwarded to `resolve_album`
+    (see there) to redirect the album-id cache away from the default
+    `cfg["gphotos_album_id"]` — used by per-student sync.
 
     Returns {"uploaded": N, "failed": N, "album_id": id-or-None,
     "candidates": N}. Raises AuthError if credentials are missing/invalid —
@@ -374,13 +386,14 @@ def upload_pending(cfg, save_cfg, state, out_dir, checkpoint, mode=None,
 
     if dry_run:
         resolved = (resolve_album(cfg, _Cache(), save_cfg, album_title, album_id,
-                                   allow_network=False)
+                                   allow_network=False, cache_get=cache_get, cache_set=cache_set)
                     if mode == "album" else None)
         return {"uploaded": 0, "failed": 0, "album_id": resolved, "candidates": len(items)}
 
     cache = _Cache()
     _access_token(cfg, cache)  # fail fast (AuthError) before doing any work
-    resolved_album_id = (resolve_album(cfg, cache, save_cfg, album_title, album_id)
+    resolved_album_id = (resolve_album(cfg, cache, save_cfg, album_title, album_id,
+                                        cache_get=cache_get, cache_set=cache_set)
                           if mode == "album" else None)
 
     uploaded = failed = 0
