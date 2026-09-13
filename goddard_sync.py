@@ -329,20 +329,24 @@ def _migrate_existing_files(out_dir, items, state):
 
 
 # --- Feed items --------------------------------------------------------------
-def _image_items(results):
+def _media_items(results):
+    """Collect both image and video moments. Videos have no usable `base`
+    URL from the feed (only a `_thumb.jpg` still) — the actual file has to
+    come from the detail endpoint, done in `_download_video`."""
     items = {}
     for r in results:
         if r.get("type") != "moment":
             continue
         for m in r.get("moments", []):
-            if m.get("type") != "image":
+            mtype = m.get("type")
+            if mtype not in ("image", "video"):
                 continue
             url = m.get("thumbnailTransformed") or m.get("thumbnail") or ""
             if not url.startswith("http"):
                 url = CDN + url
             items[m["_id"]] = {
                 "id": m["_id"],
-                "type": "image",
+                "type": mtype,
                 "base": re.sub(r"_thumb(\.\w+)$", "", url),
                 "is_draft": "/drafts/" in url,
                 "date": r.get("date", ""),
@@ -352,10 +356,16 @@ def _image_items(results):
 
 
 # --- Download ----------------------------------------------------------------
-def _download_one(item, out_dir):
-    """Download one new (not-yet-present) image item. Returns a dict:
+def _download_one(item, out_dir, token):
+    """Download one new (not-yet-present) media item. Returns a dict:
     {"status": "ok"|"err", "file", "rendition", "bytes", "type"} — the caller
     uses this to build the item's state entry."""
+    if item["type"] == "video":
+        return _download_video(item, out_dir, token)
+    return _download_image(item, out_dir)
+
+
+def _download_image(item, out_dir):
     candidates = ([] if item["is_draft"] else [("original", item["base"] + ".jpg")])
     candidates += [("display", item["base"] + "_display.jpg"),
                    ("thumb", item["base"] + "_thumb.jpg")]
@@ -371,6 +381,30 @@ def _download_one(item, out_dir):
         return {"status": "ok", "file": fname, "rendition": rendition,
                 "bytes": len(data), "type": "image"}
     return {"status": "err"}
+
+
+def _download_video(item, out_dir, token):
+    """Videos aren't in the feed directly — call the detail endpoint for the
+    moment id to get the actual CDN path, then download it like a photo (no
+    auth needed for the CDN itself, and no lower-rendition fallback exists;
+    a 403 — e.g. a lifecycled original — is recorded as a plain failure)."""
+    try:
+        d = _http(f"{API_BASE}/feed/details/moment/{item['id']}", token=token)
+    except Exception:
+        return {"status": "err"}
+    src = (d.get("videoSource") or d.get("videoLowRendition")) if isinstance(d, dict) else None
+    if not src:
+        return {"status": "err"}
+    url = src if src.startswith("http") else CDN + src
+    data, _permanent = _fetch_with_retry(url, timeout=300)
+    if data is None:
+        return {"status": "err"}
+    fname = _filename(item["date"], item["id"], "mp4")
+    path = os.path.join(out_dir, fname)
+    _atomic_write(path, data)
+    _set_mtime(path, item["date"])
+    return {"status": "ok", "file": fname, "rendition": "original",
+            "bytes": len(data), "type": "video"}
 
 
 def _upgrade_one(mid, entry, item, out_dir):
@@ -438,7 +472,7 @@ def cmd_sync(args):
 
 def _run_sync(args, cfg, token, out_dir):
     results = fetch_feed(token)
-    items = _image_items(results)
+    items = _media_items(results)
     state, existed = _load_state(out_dir)
 
     if not existed:
@@ -450,7 +484,7 @@ def _run_sync(args, cfg, token, out_dir):
     present = _present_ids(state, out_dir)
     new_items = [it for it in items if it["id"] not in present]
 
-    print(f"{len(items)} images in feed -> {out_dir}")
+    print(f"{len(items)} media item(s) in feed -> {out_dir}")
     ok = err = 0
     new_bytes = 0
     workers = max(1, args.workers)
@@ -465,7 +499,7 @@ def _run_sync(args, cfg, token, out_dir):
             done_since_save = 0
 
     with cf.ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = {ex.submit(_download_one, it, out_dir): it for it in new_items}
+        futs = {ex.submit(_download_one, it, out_dir, token): it for it in new_items}
         for i, fut in enumerate(cf.as_completed(futs), 1):
             it = futs[fut]
             res = fut.result()
@@ -514,9 +548,10 @@ def _run_sync(args, cfg, token, out_dir):
     _save_state_atomic(out_dir, state)
 
     n_photos = sum(1 for e in state["items"].values() if e.get("type") == "image")
+    n_videos = sum(1 for e in state["items"].values() if e.get("type") == "video")
     already = len(items) - ok - upgraded - err
     summary = (f"{ok} new, {upgraded} upgraded to full-res, {already} already present, "
-               f"{err} failed. Total in library: {n_photos} photos.")
+               f"{err} failed. Total in library: {n_photos} photos, {n_videos} videos.")
     print("Sync complete:", summary)
     if err:
         _notify(cfg, f"Goddard sync: {err} failed", summary, priority="high")
@@ -554,6 +589,7 @@ def cmd_status(args):
     out_dir = os.path.expanduser(cfg["output_dir"])
     state, existed = _load_state(out_dir) if os.path.isdir(out_dir) else ({"items": {}}, False)
     photos = sum(1 for e in state["items"].values() if e.get("type") == "image")
+    videos = sum(1 for e in state["items"].values() if e.get("type") == "video")
     not_full = sum(1 for e in state["items"].values()
                    if e.get("type") == "image" and not e.get("draft")
                    and e.get("rendition") != "original")
@@ -562,6 +598,7 @@ def cmd_status(args):
     print(f"token       : {'present' if cfg.get('token') else '(not set — run login)'}")
     print(f"output dir  : {out_dir}")
     print(f"photos      : {photos} ({not_full} not full-res)")
+    print(f"videos      : {videos}")
     print(f"state file  : {_state_path(out_dir)} ({'exists' if existed else 'missing'})")
     print(f"ntfy topic  : {cfg.get('ntfy_topic') or '(disabled)'}")
     return 0
