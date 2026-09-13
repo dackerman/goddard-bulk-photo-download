@@ -222,7 +222,8 @@ for alerting from systemd/cron on its own even without ntfy configured.
   original, so the medium `_display` rendition is saved for those, and they're
   never included in the upgrade pass.
 - A lifecycled video has no lower-resolution fallback (unlike photos), so it's
-  simply recorded as a failed download until it becomes available.
+  recorded in the state file as *unavailable* (not as a failure, so it won't
+  page you every day) and quietly retried by the upgrade pass on each run.
 - If your token ever stops working, `sync` will tell you to re-run `login`.
 
 ## Tests

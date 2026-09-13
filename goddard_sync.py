@@ -33,7 +33,7 @@ truth for what's been downloaded and at what rendition — see `_load_state`.
 Stdlib only — no third-party dependencies.
 """
 from __future__ import annotations
-import argparse, concurrent.futures as cf, csv, getpass, json, os, re, sys, time
+import argparse, concurrent.futures as cf, csv, json, os, re, sys, time
 import urllib.request, urllib.error
 from datetime import datetime, timezone
 
@@ -111,13 +111,23 @@ def _http(url, method="GET", body=None, token=None, timeout=60):
         return json.loads(raw) if raw and ctype.startswith("application/json") else raw
 
 
-def _http_head(url, timeout=30):
+def _http_head(url, timeout=30, attempts=3):
     """HEAD a media URL and return {"length": <int|None>}. Raises HTTPError on
-    a non-2xx status (403/404 in particular, which callers treat specially)."""
+    a non-2xx status (403/404 in particular, which callers treat specially);
+    transient errors (429/5xx, network) are retried a few times first."""
     req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": USER_AGENT})
-    with urllib.request.urlopen(req, timeout=timeout) as resp:
-        cl = resp.headers.get("Content-Length")
-        return {"length": int(cl) if cl is not None else None}
+    for attempt in range(attempts):
+        try:
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                cl = resp.headers.get("Content-Length")
+                return {"length": int(cl) if cl is not None else None}
+        except urllib.error.HTTPError as e:
+            if e.code not in (429, 500, 502, 503) or attempt == attempts - 1:
+                raise
+        except Exception:
+            if attempt == attempts - 1:
+                raise
+        time.sleep(0.6 * (attempt + 1))
 
 
 def _fetch_with_retry(url, attempts=5, timeout=120, min_size=1000):
@@ -284,6 +294,8 @@ def _present_ids(state, out_dir):
         f = entry.get("file")
         if f and os.path.isfile(os.path.join(out_dir, f)):
             present.add(mid)
+        elif entry.get("rendition") == "unavailable":
+            present.add(mid)  # nothing on disk yet; the upgrade pass retries it
     return present
 
 
@@ -358,8 +370,12 @@ def _media_items(results):
 # --- Download ----------------------------------------------------------------
 def _download_one(item, out_dir, token):
     """Download one new (not-yet-present) media item. Returns a dict:
-    {"status": "ok"|"err", "file", "rendition", "bytes", "type"} — the caller
-    uses this to build the item's state entry."""
+    {"status": "ok"|"unavailable"|"err", "file", "rendition", "bytes", "type"}
+    — the caller uses this to build the item's state entry. "unavailable"
+    means the CDN answered a definitive 403/404 for every candidate (e.g. a
+    video whose only file was archived): it is recorded in the state so the
+    upgrade pass quietly retries it on later runs, rather than being reported
+    as a failure every day."""
     if item["type"] == "video":
         return _download_video(item, out_dir, token)
     return _download_image(item, out_dir)
@@ -369,9 +385,11 @@ def _download_image(item, out_dir):
     candidates = ([] if item["is_draft"] else [("original", item["base"] + ".jpg")])
     candidates += [("display", item["base"] + "_display.jpg"),
                    ("thumb", item["base"] + "_thumb.jpg")]
+    permanent = True
     for rendition, url in candidates:
-        data, _permanent = _fetch_with_retry(url)
+        data, perm = _fetch_with_retry(url)
         if data is None:
+            permanent = permanent and perm
             continue
         ext = _sniff_ext(data)
         fname = _filename(item["date"], item["id"], ext)
@@ -380,7 +398,7 @@ def _download_image(item, out_dir):
         _set_mtime(path, item["date"])
         return {"status": "ok", "file": fname, "rendition": rendition,
                 "bytes": len(data), "type": "image"}
-    return {"status": "err"}
+    return {"status": "unavailable" if permanent else "err", "type": "image"}
 
 
 def _download_video(item, out_dir, token):
@@ -396,9 +414,9 @@ def _download_video(item, out_dir, token):
     if not src:
         return {"status": "err"}
     url = src if src.startswith("http") else CDN + src
-    data, _permanent = _fetch_with_retry(url, timeout=300)
+    data, permanent = _fetch_with_retry(url, timeout=300)
     if data is None:
-        return {"status": "err"}
+        return {"status": "unavailable" if permanent else "err", "type": "video"}
     fname = _filename(item["date"], item["id"], "mp4")
     path = os.path.join(out_dir, fname)
     _atomic_write(path, data)
@@ -407,13 +425,21 @@ def _download_video(item, out_dir, token):
             "bytes": len(data), "type": "video"}
 
 
-def _upgrade_one(mid, entry, item, out_dir):
+def _upgrade_one(mid, entry, item, out_dir, token):
     """Check (and if needed, fetch) whether a lower-rendition item now has a
     full-res original available. Returns (kind, changes):
       kind    -- "upgraded" | "nochange" | "skip" | "err"
       changes -- dict of state fields to merge into the entry, or None
     "skip" means the original is still unavailable (403/404) — rendition is
     left as-is so it's retried again next run."""
+    if entry.get("rendition") == "unavailable":
+        # Nothing on disk at all (every candidate 403/404'd last time, or an
+        # archived video): just try the normal download again.
+        res = _download_one(item, out_dir, token)
+        if res["status"] == "ok":
+            return ("upgraded", {"file": res["file"], "rendition": res["rendition"],
+                                 "bytes": res["bytes"]})
+        return ("skip", None) if res["status"] == "unavailable" else ("err", None)
     url = item["base"] + ".jpg"
     old_path = os.path.join(out_dir, entry.get("file", ""))
     old_size = os.path.getsize(old_path) if os.path.isfile(old_path) else -1
@@ -485,7 +511,7 @@ def _run_sync(args, cfg, token, out_dir):
     new_items = [it for it in items if it["id"] not in present]
 
     print(f"{len(items)} media item(s) in feed -> {out_dir}")
-    ok = err = 0
+    ok = err = unavailable = 0
     new_bytes = 0
     workers = max(1, args.workers)
     checkpoint_every = 100
@@ -512,6 +538,13 @@ def _run_sync(args, cfg, token, out_dir):
                     "bytes": res["bytes"],
                 }
                 _checkpoint()
+            elif res["status"] == "unavailable":
+                unavailable += 1
+                state["items"][it["id"]] = {
+                    "file": None, "type": res["type"], "rendition": "unavailable",
+                    "draft": it["is_draft"], "date": it["date"], "caption": it["caption"],
+                    "bytes": 0,
+                }
             else:
                 err += 1
             if not args.quiet and (i % 100 == 0 or i == len(new_items)):
@@ -523,11 +556,12 @@ def _run_sync(args, cfg, token, out_dir):
         items_by_id = {it["id"]: it for it in items}
         upgrade_targets = [
             (mid, e) for mid, e in state["items"].items()
-            if e.get("type") == "image" and not e.get("draft")
-            and e.get("rendition") != "original" and mid in items_by_id
+            if mid in items_by_id and e.get("rendition") != "original"
+            and (e.get("rendition") == "unavailable"
+                 or (e.get("type") == "image" and not e.get("draft")))
         ]
         upgraded = 0
-        ufuts = {ex.submit(_upgrade_one, mid, e, items_by_id[mid], out_dir): mid
+        ufuts = {ex.submit(_upgrade_one, mid, e, items_by_id[mid], out_dir, token): mid
                  for mid, e in upgrade_targets}
         for i, fut in enumerate(cf.as_completed(ufuts), 1):
             mid = ufuts[fut]
@@ -549,9 +583,11 @@ def _run_sync(args, cfg, token, out_dir):
 
     n_photos = sum(1 for e in state["items"].values() if e.get("type") == "image")
     n_videos = sum(1 for e in state["items"].values() if e.get("type") == "video")
-    already = len(items) - ok - upgraded - err
+    already = len(items) - len(new_items)
+    n_unavail = sum(1 for e in state["items"].values() if e.get("rendition") == "unavailable")
     summary = (f"{ok} new, {upgraded} upgraded to full-res, {already} already present, "
-               f"{err} failed. Total in library: {n_photos} photos, {n_videos} videos.")
+               f"{err} failed. Total in library: {n_photos} photos, {n_videos} videos"
+               + (f" ({n_unavail} still archived upstream)." if n_unavail else "."))
     print("Sync complete:", summary)
     if err:
         _notify(cfg, f"Goddard sync: {err} failed", summary, priority="high")
@@ -597,8 +633,9 @@ def cmd_status(args):
     print(f"username    : {cfg.get('username') or '(not set)'}")
     print(f"token       : {'present' if cfg.get('token') else '(not set — run login)'}")
     print(f"output dir  : {out_dir}")
+    unavail = sum(1 for e in state["items"].values() if e.get("rendition") == "unavailable")
     print(f"photos      : {photos} ({not_full} not full-res)")
-    print(f"videos      : {videos}")
+    print(f"videos      : {videos}" + (f" ({unavail} item(s) archived upstream, not yet downloadable)" if unavail else ""))
     print(f"state file  : {_state_path(out_dir)} ({'exists' if existed else 'missing'})")
     print(f"ntfy topic  : {cfg.get('ntfy_topic') or '(disabled)'}")
     return 0
