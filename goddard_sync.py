@@ -161,6 +161,21 @@ def _filename(date, moment_id):
     return f"{prefix}_{moment_id}.jpg"
 
 
+def _existing_ids(out_dir):
+    """Set of moment ids already on disk, parsed from filenames of the form
+    ``<date>_<id>.<ext>``. Dedup is keyed on the immutable Kaymbu id, so a photo
+    is never downloaded twice even if its date prefix would differ between runs
+    (e.g. if a post were re-dated upstream)."""
+    ids = set()
+    if not os.path.isdir(out_dir):
+        return ids
+    for name in os.listdir(out_dir):
+        stem, ext = os.path.splitext(name)
+        if ext.lower() in (".jpg", ".jpeg", ".png", ".mp4", ".mov") and "_" in stem:
+            ids.add(stem.rsplit("_", 1)[-1])
+    return ids
+
+
 def _image_items(results):
     items = {}
     for r in results:
@@ -182,9 +197,11 @@ def _image_items(results):
     return list(items.values())
 
 
-def _download_one(item, out_dir):
+def _download_one(item, out_dir, existing_ids):
     path = os.path.join(out_dir, _filename(item["date"], item["id"]))
-    if os.path.exists(path) and os.path.getsize(path) > 1000:
+    # Dedup by immutable id: if we already have this moment under any filename,
+    # skip it regardless of the date prefix.
+    if item["id"] in existing_ids:
         return ("skip", path, 0)
     # priority: full-res original, then display rendition, then thumbnail
     candidates = ([] if item["is_draft"] else [item["base"] + ".jpg"])
@@ -233,12 +250,13 @@ def cmd_sync(args):
         raise
 
     items = _image_items(results)
+    existing_ids = _existing_ids(out_dir)  # scan the folder once, dedup by id
     print(f"{len(items)} images in feed -> {out_dir}")
     ok = skip = err = 0
     new_bytes = 0
     workers = max(1, args.workers)
     with cf.ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = [ex.submit(_download_one, it, out_dir) for it in items]
+        futs = [ex.submit(_download_one, it, out_dir, existing_ids) for it in items]
         for i, fut in enumerate(cf.as_completed(futs), 1):
             status, _path, size = fut.result()
             if status == "ok":
