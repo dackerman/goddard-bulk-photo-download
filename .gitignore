@@ -1,0 +1,19 @@
+# Local config holds your personal token/username — never commit it
+config.json
+*.token
+.env
+
+# Downloaded photos and manifests
+photos/
+*.jpg
+*.jpeg
+*.png
+*.mp4
+*.mov
+manifest.csv
+
+# Python / editor cruft
+__pycache__/
+*.pyc
+.venv/
+.DS_Store

@@ -1,0 +1,14 @@
+[Unit]
+Description=Run the Goddard photo sync every weekday at 7pm
+
+[Timer]
+# 19:00 in the machine's local timezone, Monday through Friday.
+# (On a machine set to America/New_York this is 7pm ET, DST-aware.)
+OnCalendar=Mon..Fri 19:00
+# Catch up if the machine was asleep/off at the scheduled time.
+Persistent=true
+# Spread out to avoid a thundering herd if many timers share the minute.
+RandomizedDelaySec=120
+
+[Install]
+WantedBy=timers.target

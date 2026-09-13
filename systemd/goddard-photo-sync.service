@@ -1,0 +1,10 @@
+[Unit]
+Description=Sync new Goddard Family Hub photos
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# __REPO_DIR__ is replaced by install.sh with the absolute repo path.
+ExecStart=/usr/bin/python3 __REPO_DIR__/goddard_sync.py sync
+Nice=10
