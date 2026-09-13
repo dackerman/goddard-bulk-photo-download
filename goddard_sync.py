@@ -17,9 +17,18 @@ Design notes / how the media URLs work:
   * The feed (`POST /feed`) returns "moment" results, each with image entries
     whose `thumbnailTransformed` URL ends in `_thumb.jpg`.
   * Dropping the `_thumb` suffix yields the full-resolution original on the
-    public CDN (no auth needed once you know the path).
+    public CDN (no auth needed once you know the path) — *when* it's still
+    available; Kaymbu lifecycles older originals into Glacier, so the same URL
+    can start returning the original weeks after only a lower rendition was
+    fetchable. A per-item state file lets `sync` notice and upgrade later.
   * "Draft" graphics (newsletter/invitation art under a `/drafts/` path) have no
     full original; for those we fall back to the `_display.jpg` rendition.
+  * Some "full-res" originals are actually served as HEIC bytes at the `.jpg`
+    URL (content-type image/heic). We sniff the downloaded bytes and name the
+    file accordingly instead of trusting the URL's extension.
+
+A hidden `.goddard-state.json` file in the output directory is the source of
+truth for what's been downloaded and at what rendition — see `_load_state`.
 
 Stdlib only — no third-party dependencies.
 """
@@ -43,6 +52,9 @@ DEFAULT_CLIENT_SECRET = "9Odd4rd-f4mIlY-hu8!"
 
 DEFAULT_CONFIG = os.path.expanduser("~/.config/goddard-photo-sync/config.json")
 USER_AGENT = "okhttp/4.9"
+
+# State file lives inside the output dir (hidden so photo apps ignore it).
+STATE_FILENAME = ".goddard-state.json"
 
 
 # --- Config ----------------------------------------------------------------
@@ -99,6 +111,43 @@ def _http(url, method="GET", body=None, token=None, timeout=60):
         return json.loads(raw) if raw and ctype.startswith("application/json") else raw
 
 
+def _http_head(url, timeout=30):
+    """HEAD a media URL and return {"length": <int|None>}. Raises HTTPError on
+    a non-2xx status (403/404 in particular, which callers treat specially)."""
+    req = urllib.request.Request(url, method="HEAD", headers={"User-Agent": USER_AGENT})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        cl = resp.headers.get("Content-Length")
+        return {"length": int(cl) if cl is not None else None}
+
+
+def _fetch_with_retry(url, attempts=5, timeout=120, min_size=1000):
+    """GET url, retrying on transient errors. Returns (data, permanent):
+      data      -- bytes on success, else None
+      permanent -- True iff failure was an explicit 403/404. Notably, a
+                   Glacier Deep Archive original can HEAD 200 with a real
+                   Content-Length yet still GET 403 "InvalidObjectState"
+                   (S3 serves cached metadata via HEAD without needing a
+                   restore); callers use this flag to tell "truly
+                   unavailable right now" apart from a network hiccup.
+    """
+    for attempt in range(attempts):
+        try:
+            data = _http(url, timeout=timeout)
+            if isinstance(data, (bytes, bytearray)) and len(data) > min_size:
+                return data, False
+            return None, False  # too small — treat as unavailable, don't retry
+        except urllib.error.HTTPError as e:
+            if e.code in (429, 500, 502, 503):  # transient/throttle — retry
+                time.sleep(0.6 * (attempt + 1))
+                continue
+            # 403 (often S3 "InvalidObjectState": lifecycled into Glacier Deep
+            # Archive) or 404 — permanent, don't retry.
+            return None, True
+        except Exception:
+            time.sleep(0.6 * (attempt + 1))
+    return None, False
+
+
 # --- Auth ------------------------------------------------------------------
 def cmd_login(args):
     cfg = load_config(args.config)
@@ -147,35 +196,139 @@ def fetch_feed(token):
     return results
 
 
-# --- Download --------------------------------------------------------------
+# --- Filenames / dates ------------------------------------------------------
 def _dt(s):
+    """Parse a feed ISO date string to an aware UTC datetime, or None."""
     try:
         return datetime.fromisoformat(s.replace("Z", "+00:00"))
     except Exception:
         return None
 
 
-def _filename(date, moment_id):
-    d = _dt(date)
+def _local_dt(s):
+    """Same as _dt, converted to the machine's local timezone. Feed dates are
+    UTC; EXIF capture times (and how a parent would think of "that evening's
+    photos") are local, so filenames should sort/group by local date."""
+    d = _dt(s)
+    return d.astimezone() if d else None
+
+
+def _filename(date, moment_id, ext="jpg"):
+    d = _local_dt(date)
     prefix = d.strftime("%Y-%m-%d_%H%M%S") if d else "nodate"
-    return f"{prefix}_{moment_id}.jpg"
+    return f"{prefix}_{moment_id}.{ext}"
 
 
-def _existing_ids(out_dir):
-    """Set of moment ids already on disk, parsed from filenames of the form
-    ``<date>_<id>.<ext>``. Dedup is keyed on the immutable Kaymbu id, so a photo
-    is never downloaded twice even if its date prefix would differ between runs
-    (e.g. if a post were re-dated upstream)."""
-    ids = set()
+def _sniff_ext(data, default="jpg"):
+    """Determine a media file's real extension from its bytes, since Kaymbu
+    sometimes serves HEIC (or other) bytes at a URL that ends in .jpg."""
+    if not data or len(data) < 12:
+        return default
+    if data[0:2] == b"\xff\xd8":
+        return "jpg"
+    if data[0:8] == b"\x89PNG\r\n\x1a\n":
+        return "png"
+    if data[4:8] == b"ftyp" and data[8:12] in (b"heic", b"heix", b"mif1", b"heif", b"hevc"):
+        return "heic"
+    return default
+
+
+def _atomic_write(path, data):
+    tmp = path + ".part"
+    with open(tmp, "wb") as f:
+        f.write(data)
+    os.replace(tmp, path)
+
+
+def _set_mtime(path, date_iso):
+    """Set a downloaded file's mtime to its feed date, so the filesystem
+    timestamp matches reality even though we wrote the bytes just now."""
+    d = _dt(date_iso)
+    if d:
+        ts = d.timestamp()
+        os.utime(path, (ts, ts))
+
+
+# --- State file --------------------------------------------------------------
+def _state_path(out_dir):
+    return os.path.join(out_dir, STATE_FILENAME)
+
+
+def _load_state(out_dir):
+    """Returns (state, existed). `existed` is False the very first time this
+    runs against a given output dir — that's when the one-time migration of
+    pre-state-file downloads happens."""
+    path = _state_path(out_dir)
+    if not os.path.exists(path):
+        return {"version": 1, "items": {}}, False
+    with open(path) as f:
+        state = json.load(f)
+    state.setdefault("version", 1)
+    state.setdefault("items", {})
+    return state, True
+
+
+def _save_state_atomic(out_dir, state):
+    path = _state_path(out_dir)
+    tmp = path + ".tmp"
+    with open(tmp, "w") as f:
+        json.dump(state, f, indent=2, sort_keys=True)
+    os.replace(tmp, path)
+
+
+def _present_ids(state, out_dir):
+    """Ids the state file says we already have *and* that still exist on
+    disk (a user may have deleted a file — then we re-download it)."""
+    present = set()
+    for mid, entry in state["items"].items():
+        f = entry.get("file")
+        if f and os.path.isfile(os.path.join(out_dir, f)):
+            present.add(mid)
+    return present
+
+
+def _migrate_existing_files(out_dir, items, state):
+    """One-time migration for folders downloaded before the state file existed:
+    for every feed item whose id matches a file already on disk (any name
+    ending in ``..._<id>.<ext>``), rename it to the canonical local-time name
+    (sniffing the real bytes for the true extension — this is what fixes
+    HEIC-as-.jpg files) and record a state entry with rendition "unknown" so
+    the upgrade pass revisits it. Files on disk that aren't in the feed are
+    left completely alone."""
     if not os.path.isdir(out_dir):
-        return ids
+        return 0
+    by_id = {}
     for name in os.listdir(out_dir):
         stem, ext = os.path.splitext(name)
-        if ext.lower() in (".jpg", ".jpeg", ".png", ".mp4", ".mov") and "_" in stem:
-            ids.add(stem.rsplit("_", 1)[-1])
-    return ids
+        if ext.lower() in (".jpg", ".jpeg", ".png", ".heic", ".mp4", ".mov") and "_" in stem:
+            by_id[stem.rsplit("_", 1)[-1]] = name
+    migrated = 0
+    for it in items:
+        old_name = by_id.get(it["id"])
+        if not old_name:
+            continue
+        old_path = os.path.join(out_dir, old_name)
+        if not os.path.isfile(old_path):
+            continue
+        with open(old_path, "rb") as f:
+            head = f.read(12)
+        size = os.path.getsize(old_path)
+        ext = "mp4" if it["type"] == "video" else _sniff_ext(head)
+        new_name = _filename(it["date"], it["id"], ext)
+        new_path = os.path.join(out_dir, new_name)
+        if new_path != old_path:
+            os.replace(old_path, new_path)
+        _set_mtime(new_path, it["date"])
+        state["items"][it["id"]] = {
+            "file": new_name, "type": it["type"], "rendition": "unknown",
+            "draft": it["is_draft"], "date": it["date"], "caption": it["caption"],
+            "bytes": size,
+        }
+        migrated += 1
+    return migrated
 
 
+# --- Feed items --------------------------------------------------------------
 def _image_items(results):
     items = {}
     for r in results:
@@ -189,6 +342,7 @@ def _image_items(results):
                 url = CDN + url
             items[m["_id"]] = {
                 "id": m["_id"],
+                "type": "image",
                 "base": re.sub(r"_thumb(\.\w+)$", "", url),
                 "is_draft": "/drafts/" in url,
                 "date": r.get("date", ""),
@@ -197,38 +351,64 @@ def _image_items(results):
     return list(items.values())
 
 
-def _download_one(item, out_dir, existing_ids):
-    path = os.path.join(out_dir, _filename(item["date"], item["id"]))
-    # Dedup by immutable id: if we already have this moment under any filename,
-    # skip it regardless of the date prefix.
-    if item["id"] in existing_ids:
-        return ("skip", path, 0)
-    # priority: full-res original, then display rendition, then thumbnail
-    candidates = ([] if item["is_draft"] else [item["base"] + ".jpg"])
-    candidates += [item["base"] + "_display.jpg", item["base"] + "_thumb.jpg"]
-    for url in candidates:
-        for attempt in range(5):
-            try:
-                data = _http(url, timeout=120)
-                if isinstance(data, (bytes, bytearray)) and len(data) > 1000:
-                    tmp = path + ".part"
-                    with open(tmp, "wb") as f:
-                        f.write(data)
-                    os.replace(tmp, path)
-                    return ("ok", path, len(data))
-                break  # too small — try next candidate
-            except urllib.error.HTTPError as e:
-                if e.code in (429, 500, 502, 503):  # transient/throttle — retry
-                    time.sleep(0.6 * (attempt + 1))
-                    continue
-                # 403 (often S3 "InvalidObjectState": the full-res original has
-                # been lifecycled into Glacier Deep Archive and can't be fetched
-                # directly) or 404 — permanent, so don't retry; fall through to
-                # the next candidate (display rendition, then thumbnail).
-                break
-            except Exception:
-                time.sleep(0.6 * (attempt + 1))
-    return ("err", path, 0)
+# --- Download ----------------------------------------------------------------
+def _download_one(item, out_dir):
+    """Download one new (not-yet-present) image item. Returns a dict:
+    {"status": "ok"|"err", "file", "rendition", "bytes", "type"} — the caller
+    uses this to build the item's state entry."""
+    candidates = ([] if item["is_draft"] else [("original", item["base"] + ".jpg")])
+    candidates += [("display", item["base"] + "_display.jpg"),
+                   ("thumb", item["base"] + "_thumb.jpg")]
+    for rendition, url in candidates:
+        data, _permanent = _fetch_with_retry(url)
+        if data is None:
+            continue
+        ext = _sniff_ext(data)
+        fname = _filename(item["date"], item["id"], ext)
+        path = os.path.join(out_dir, fname)
+        _atomic_write(path, data)
+        _set_mtime(path, item["date"])
+        return {"status": "ok", "file": fname, "rendition": rendition,
+                "bytes": len(data), "type": "image"}
+    return {"status": "err"}
+
+
+def _upgrade_one(mid, entry, item, out_dir):
+    """Check (and if needed, fetch) whether a lower-rendition item now has a
+    full-res original available. Returns (kind, changes):
+      kind    -- "upgraded" | "nochange" | "skip" | "err"
+      changes -- dict of state fields to merge into the entry, or None
+    "skip" means the original is still unavailable (403/404) — rendition is
+    left as-is so it's retried again next run."""
+    url = item["base"] + ".jpg"
+    old_path = os.path.join(out_dir, entry.get("file", ""))
+    old_size = os.path.getsize(old_path) if os.path.isfile(old_path) else -1
+    try:
+        head = _http_head(url)
+    except urllib.error.HTTPError as e:
+        if e.code in (403, 404):
+            return ("skip", None)
+        return ("err", None)
+    except Exception:
+        return ("err", None)
+    if head["length"] is not None and head["length"] == old_size:
+        # Already full-res on disk — just a mislabeled ("unknown") entry.
+        return ("nochange", {"rendition": "original"})
+    data, permanent = _fetch_with_retry(url, timeout=180)
+    if data is None:
+        # A HEAD 200 doesn't guarantee a GET succeeds: a Deep Archive object
+        # still 403s "InvalidObjectState" on GET even though HEAD reports its
+        # (cached) metadata. Treat that the same as a HEAD 403/404 — leave
+        # rendition as-is and retry next run.
+        return ("skip", None) if permanent else ("err", None)
+    ext = _sniff_ext(data)
+    new_name = _filename(item["date"], mid, ext)
+    new_path = os.path.join(out_dir, new_name)
+    _atomic_write(new_path, data)
+    _set_mtime(new_path, item["date"])
+    if new_path != old_path and os.path.isfile(old_path):
+        os.remove(old_path)
+    return ("upgraded", {"file": new_name, "rendition": "original", "bytes": len(data)})
 
 
 def cmd_sync(args):
@@ -250,39 +430,98 @@ def cmd_sync(args):
         raise
 
     items = _image_items(results)
-    existing_ids = _existing_ids(out_dir)  # scan the folder once, dedup by id
+    state, existed = _load_state(out_dir)
+
+    if not existed:
+        migrated = _migrate_existing_files(out_dir, items, state)
+        if migrated:
+            print(f"Migrated {migrated} existing file(s) to the local-time naming scheme.")
+            _save_state_atomic(out_dir, state)
+
+    present = _present_ids(state, out_dir)
+    new_items = [it for it in items if it["id"] not in present]
+
     print(f"{len(items)} images in feed -> {out_dir}")
-    ok = skip = err = 0
+    ok = err = 0
     new_bytes = 0
     workers = max(1, args.workers)
+    checkpoint_every = 100
+    done_since_save = 0
+
+    def _checkpoint():
+        nonlocal done_since_save
+        done_since_save += 1
+        if done_since_save >= checkpoint_every:
+            _save_state_atomic(out_dir, state)
+            done_since_save = 0
+
     with cf.ThreadPoolExecutor(max_workers=workers) as ex:
-        futs = [ex.submit(_download_one, it, out_dir, existing_ids) for it in items]
+        futs = {ex.submit(_download_one, it, out_dir): it for it in new_items}
         for i, fut in enumerate(cf.as_completed(futs), 1):
-            status, _path, size = fut.result()
-            if status == "ok":
-                ok += 1; new_bytes += size
-            elif status == "skip":
-                skip += 1
+            it = futs[fut]
+            res = fut.result()
+            if res["status"] == "ok":
+                ok += 1
+                new_bytes += res["bytes"]
+                state["items"][it["id"]] = {
+                    "file": res["file"], "type": res["type"], "rendition": res["rendition"],
+                    "draft": it["is_draft"], "date": it["date"], "caption": it["caption"],
+                    "bytes": res["bytes"],
+                }
+                _checkpoint()
             else:
                 err += 1
-            if i % 100 == 0 or i == len(items):
-                print(f"  {i}/{len(items)}  new={ok} existing={skip} failed={err}",
-                      flush=True)
+            if i % 100 == 0 or i == len(new_items):
+                print(f"  new {i}/{len(new_items)}  ok={ok} failed={err}", flush=True)
 
-    _write_manifest(out_dir, items)
-    summary = f"{ok} new photo(s), {skip} already present, {err} failed. Total in library: {len(items)}."
+        # Upgrade pass: revisit anything not already known to be full-res
+        # (including "unknown" entries from migration) now that a Glacier
+        # original may have thawed, or so a migrated file gets fixed up.
+        items_by_id = {it["id"]: it for it in items}
+        upgrade_targets = [
+            (mid, e) for mid, e in state["items"].items()
+            if e.get("type") == "image" and not e.get("draft")
+            and e.get("rendition") != "original" and mid in items_by_id
+        ]
+        upgraded = 0
+        ufuts = {ex.submit(_upgrade_one, mid, e, items_by_id[mid], out_dir): mid
+                 for mid, e in upgrade_targets}
+        for i, fut in enumerate(cf.as_completed(ufuts), 1):
+            mid = ufuts[fut]
+            kind, changes = fut.result()
+            if kind == "upgraded":
+                state["items"][mid].update(changes)
+                upgraded += 1
+                _checkpoint()
+            elif kind == "nochange":
+                state["items"][mid].update(changes)
+            elif kind == "err":
+                err += 1
+            # "skip" (still 403/404): leave rendition as-is, retried next run.
+            if i % 100 == 0 or i == len(upgrade_targets):
+                print(f"  upgrade {i}/{len(upgrade_targets)}  upgraded={upgraded}", flush=True)
+
+    _write_manifest(out_dir, state)
+    _save_state_atomic(out_dir, state)
+
+    n_photos = sum(1 for e in state["items"].values() if e.get("type") == "image")
+    already = len(items) - ok - upgraded - err
+    summary = (f"{ok} new, {upgraded} upgraded to full-res, {already} already present, "
+               f"{err} failed. Total in library: {n_photos} photos.")
     print("Sync complete:", summary)
-    if ok and cfg.get("ntfy_topic"):
-        _notify(cfg, f"Goddard: {ok} new photo(s) synced", summary)
+    if (ok or upgraded) and cfg.get("ntfy_topic"):
+        _notify(cfg, f"Goddard: {ok} new, {upgraded} upgraded", summary)
     return 1 if err and not ok else 0
 
 
-def _write_manifest(out_dir, items):
+def _write_manifest(out_dir, state):
+    rows = sorted(state["items"].items(), key=lambda kv: kv[1].get("date", ""))
     with open(os.path.join(out_dir, "manifest.csv"), "w", newline="") as f:
         w = csv.writer(f)
-        w.writerow(["file", "moment_id", "date", "caption"])
-        for it in items:
-            w.writerow([_filename(it["date"], it["id"]), it["id"], it["date"], it["caption"]])
+        w.writerow(["file", "moment_id", "type", "date", "rendition", "caption"])
+        for mid, e in rows:
+            w.writerow([e.get("file", ""), mid, e.get("type", ""), e.get("date", ""),
+                        e.get("rendition", ""), e.get("caption", "")])
 
 
 def _notify(cfg, title, message):
@@ -298,12 +537,17 @@ def _notify(cfg, title, message):
 def cmd_status(args):
     cfg = load_config(args.config)
     out_dir = os.path.expanduser(cfg["output_dir"])
-    n = len([f for f in os.listdir(out_dir) if f.endswith(".jpg")]) if os.path.isdir(out_dir) else 0
+    state, existed = _load_state(out_dir) if os.path.isdir(out_dir) else ({"items": {}}, False)
+    photos = sum(1 for e in state["items"].values() if e.get("type") == "image")
+    not_full = sum(1 for e in state["items"].values()
+                   if e.get("type") == "image" and not e.get("draft")
+                   and e.get("rendition") != "original")
     print(f"config file : {args.config} ({'exists' if os.path.exists(args.config) else 'missing'})")
     print(f"username    : {cfg.get('username') or '(not set)'}")
     print(f"token       : {'present' if cfg.get('token') else '(not set — run login)'}")
     print(f"output dir  : {out_dir}")
-    print(f"photos      : {n}")
+    print(f"photos      : {photos} ({not_full} not full-res)")
+    print(f"state file  : {_state_path(out_dir)} ({'exists' if existed else 'missing'})")
     print(f"ntfy topic  : {cfg.get('ntfy_topic') or '(disabled)'}")
     return 0
 
