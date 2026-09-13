@@ -799,8 +799,11 @@ def cmd_upload(args):
 
 def main(argv=None):
     # --config is shared so it works both before and after the subcommand.
+    # SUPPRESS (rather than a default) so a subparser's copy of --config can't
+    # overwrite a value given before the subcommand; the default is applied
+    # after parsing instead.
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--config", default=DEFAULT_CONFIG,
+    common.add_argument("--config", default=argparse.SUPPRESS,
                         help=f"config file path (default: {DEFAULT_CONFIG})")
 
     p = argparse.ArgumentParser(
@@ -855,6 +858,8 @@ def main(argv=None):
     pup.set_defaults(func=cmd_upload)
 
     args = p.parse_args(argv)
+    if not hasattr(args, "config"):
+        args.config = DEFAULT_CONFIG
     return args.func(args)
 
 

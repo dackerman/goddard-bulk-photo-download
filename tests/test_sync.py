@@ -179,3 +179,25 @@ class TestMigration(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TestConfigArgPosition(unittest.TestCase):
+    """--config must work both before and after the subcommand."""
+    def _parse(self, argv):
+        captured = {}
+        orig = gs.cmd_status
+        gs.cmd_status = lambda a: captured.setdefault("config", a.config) or 0
+        try:
+            gs.main(argv)
+        finally:
+            gs.cmd_status = orig
+        return captured["config"]
+
+    def test_before_subcommand(self):
+        self.assertEqual(self._parse(["--config", "/tmp/x.json", "status"]), "/tmp/x.json")
+
+    def test_after_subcommand(self):
+        self.assertEqual(self._parse(["status", "--config", "/tmp/y.json"]), "/tmp/y.json")
+
+    def test_default(self):
+        self.assertEqual(self._parse(["status"]), gs.DEFAULT_CONFIG)
