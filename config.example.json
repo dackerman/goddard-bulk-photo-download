@@ -2,5 +2,6 @@
   "username": "your-phone-or-email",
   "output_dir": "~/Pictures/Goddard",
   "ntfy_server": "https://ntfy.sh",
-  "ntfy_topic": null
+  "ntfy_topic": null,
+  "gphotos_mode": "off"
 }

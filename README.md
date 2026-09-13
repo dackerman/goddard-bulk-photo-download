@@ -116,9 +116,10 @@ untouched.
 this is the source of truth for what's been downloaded, at what rendition,
 and whether it's a draft. It's written atomically and safe to inspect, but
 don't hand-edit it while a sync is running. It's also designed to be a stable
-extension point: other tools can add their own keys to an item's entry (e.g. a
-future Google Photos uploader tracking an `"uploaded"` flag), and `sync` never
-drops keys it doesn't recognize when it rewrites an entry.
+extension point: other tools can add their own keys to an item's entry, and
+`sync` never drops keys it doesn't recognize when it rewrites an entry. The
+Google Photos uploader (below) is one such extension: it adds a `"gphotos"`
+key, `{"id", "rendition", "album_id", "at"}`, once an item has been uploaded.
 
 Progress is checkpointed to this file every ~100 completed
 downloads/upgrades, so an interrupted first-time backfill picks up close to
@@ -169,6 +170,12 @@ which takes precedence — handy for containers or CI.
 | `ntfy_server`   | `GODDARD_NTFY_SERVER`   | ntfy server (default `https://ntfy.sh`)               |
 | `client_id`     | `GODDARD_CLIENT_ID`     | App OAuth client id (sensible default built in)       |
 | `client_secret` | `GODDARD_CLIENT_SECRET` | App OAuth client secret (sensible default built in)   |
+| `gphotos_client_id`     | `GODDARD_GPHOTOS_CLIENT_ID`     | Your Google Cloud OAuth client id (written by `gphotos-login`) |
+| `gphotos_client_secret` | `GODDARD_GPHOTOS_CLIENT_SECRET` | Your Google Cloud OAuth client secret (written by `gphotos-login`) |
+| `gphotos_refresh_token` | `GODDARD_GPHOTOS_REFRESH_TOKEN` | Long-lived token (written by `gphotos-login`)          |
+| `gphotos_mode`          | `GODDARD_GPHOTOS_MODE`          | `off` (default) / `library` / `album` — see below      |
+| `gphotos_album`         | `GODDARD_GPHOTOS_ALBUM`         | Album title for mode `album` (default `Goddard`)       |
+| `gphotos_album_id`      | `GODDARD_GPHOTOS_ALBUM_ID`      | Cached id of the app-created album (resolved automatically) |
 
 ### Push notifications
 
@@ -190,6 +197,102 @@ Set `ntfy_topic` (and optionally `ntfy_server`) to get a
 (re-run `login`), `1` if anything failed to download, `0` otherwise — useful
 for alerting from systemd/cron on its own even without ntfy configured.
 
+## Google Photos upload (optional)
+
+`sync` can also push everything it downloads up to Google Photos, so your
+partner (or anyone else) can browse the same library there without needing
+this tool at all. It's entirely optional and off by default (`gphotos_mode:
+"off"`).
+
+Three modes:
+
+- **`off`** (default) — no upload happens.
+- **`library`** — every downloaded photo/video is added straight to your main
+  Google Photos library, no album.
+- **`album`** — everything goes into one album (title from `gphotos_album`,
+  default `"Goddard"`), which this tool creates the first time it's needed.
+
+> **Google Photos API restriction:** this tool can only see and add to
+> albums it created itself. It cannot see, and has no way to write to, an
+> album you made by hand in the Google Photos app, or one created by some
+> other app. If you want the photos in a hand-made album, move them there
+> yourself in the Photos app after they land in the app-created one — there's
+> no API for automating that last step.
+
+### Re-uploading on upgrade
+
+Google Photos offers no "replace an existing item" API. When `sync`'s
+upgrade pass later swaps a `_display`-rendition photo for its full-resolution
+original (see [Limitations](#limitations)), the uploader notices the
+rendition changed and uploads it *again* as a brand-new item — it can't
+update the one already up there. The older, lower-resolution copy is left in
+your Google Photos library; if you don't want the duplicate, delete it by
+hand (it's easy to spot — same photo, smaller/blurrier).
+
+### Setup (Google Cloud side)
+
+You need your own Google OAuth client — this is a one-time, few-minutes
+setup in a browser:
+
+1. Go to the [Google Cloud Console](https://console.cloud.google.com/) and
+   create a new project (or pick an existing one you're happy to use for
+   this).
+2. **APIs & Services → Library** — search for and enable the
+   **Google Photos Library API**.
+3. **APIs & Services → OAuth consent screen** — configure it:
+   - User type: **External**.
+   - Fill in the required app name/support email fields (anything
+     reasonable — only you will ever see this screen).
+   - Under **Test users**, add your own Google account's email address.
+4. **APIs & Services → Credentials → Create Credentials → OAuth client ID**
+   — application type **Desktop app**. Give it any name.
+5. Copy the generated **Client ID** and **Client Secret**.
+6. Run the login flow:
+
+   ```bash
+   ./goddard_sync.py gphotos-login --client-id "<id>" --client-secret "<secret>"
+   ```
+
+   This opens your browser to Google's consent screen (or prints a URL to
+   open manually if you pass `--no-browser`, e.g. over SSH). Sign in, approve
+   the requested Photos permissions, and the tool stores a refresh token in
+   your config file.
+7. Set a mode and upload:
+
+   ```bash
+   # edit ~/.config/goddard-photo-sync/config.json:
+   #   "gphotos_mode": "library"   (or "album")
+
+   ./goddard_sync.py upload --dry-run   # see what would be uploaded first
+   ./goddard_sync.py upload
+   ```
+
+   From then on, every `sync` run also uploads anything new (unless you pass
+   `sync --no-upload`).
+
+**Important — "Testing" vs. "In production":** while your OAuth consent
+screen is in **Testing** publishing status, Google expires refresh tokens
+after **7 days**, which will silently break a daily scheduled sync. For a
+tool you run unattended, go to **OAuth consent screen** in the Cloud Console
+and click **Publish App** to move it to **In production**. For a personal
+tool like this you do *not* need Google's verification review — you'll see
+an "unverified app" warning the next time you `gphotos-login`, just click
+through it (Advanced → Go to \<app name\> (unsafe)); it's your own app,
+requesting access to your own account.
+
+### Other commands
+
+```bash
+./goddard_sync.py albums          # list albums this tool has created, with their ids
+./goddard_sync.py upload --dry-run --mode album --album "2026 photos"
+./goddard_sync.py status          # also shows gphotos mode/login/pending count
+```
+
+If your refresh token is ever revoked or expires, `sync` and `upload` report
+it clearly (exit code `2`, and — for `sync` — a high-priority ntfy titled
+"Goddard: Google Photos login expired") rather than failing silently; re-run
+`gphotos-login` to fix it.
+
 ## Security & privacy
 
 - **No personal data in the repo.** Your token, username, and photos are stored
@@ -201,6 +304,10 @@ for alerting from systemd/cron on its own even without ntfy configured.
   rotates them.
 - The tool talks only to Kaymbu's official hosts over HTTPS and downloads only
   what your account can see.
+- **Google Photos credentials are yours, not baked in.** `gphotos_client_id`/
+  `gphotos_client_secret`/`gphotos_refresh_token` live in the same `600`
+  config file and are never logged or sent anywhere but Google's own OAuth
+  and Photos Library API hosts.
 
 ## Limitations
 
@@ -234,8 +341,13 @@ python3 -m unittest discover tests
 
 Covers filename generation (local-time conversion), byte-sniffing for
 extensions, state file load/save (including preserving unknown keys other
-tools may add), and the one-time migration of pre-state-file libraries. No
-network access required.
+tools may add), and the one-time migration of pre-state-file libraries.
+`tests/test_gphotos.py` covers the Google Photos uploader — pending-item
+selection, batching at 50 items, state marking (including partial batch
+failures), album resolution (cached/found/created), 401-triggered token
+refresh, and that `--dry-run` performs no network calls or writes — with
+`goddard_gphotos.request` (the module's sole HTTP entry point) mocked
+throughout. No network access required for any test.
 
 ## License
 
