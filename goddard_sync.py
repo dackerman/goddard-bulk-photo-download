@@ -711,6 +711,26 @@ def _run_sync_per_student(args, cfg, token, results, items):
         print("per_student is enabled but no student ids were found in the feed.")
         return 0
 
+    # A child whose name could only be synthesized from the id (no config
+    # entry and no daily sheet naming them yet — typical on a new child's very
+    # first day) is deferred rather than synced: syncing now would create a
+    # folder and Google Photos album under the placeholder name, and both
+    # would have to be redone once the real name shows up. Daily sheets
+    # normally arrive the same afternoon, so the next run picks them up; the
+    # notification tells the admin the id in case they'd rather set a name.
+    deferred = [c for c in children if c["name_source"] == "fallback"]
+    if deferred:
+        for c in deferred:
+            print(f"Deferring student {c['id']}: no name yet (no config entry and no "
+                  f"daily sheet naming them). Will sync once a name is known.")
+        _notify(cfg, "Goddard: new student seen, waiting for a name",
+                "New student id(s) with no name yet: " + ", ".join(c["id"] for c in deferred)
+                + ". Syncing is deferred until a daily sheet names them, or you add "
+                '{"students": {"<id>": {"name": "..."}}} to the config.', priority="high")
+        children = [c for c in children if c["name_source"] != "fallback"]
+        if not children:
+            return 0
+
     groups = _group_by_student(items, [c["id"] for c in children])
     child_results = []
     for c in children:

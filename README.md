@@ -220,11 +220,13 @@ mixing everyone into one library:
   - {name}` (album) is appended automatically so two children's libraries
   can never collide.
 - **A new child needs zero setup.** The first time a sibling's student id
-  shows up in the feed, it gets its own folder/album automatically — named
-  from a daily sheet's possessive label (e.g. "Maya's" -> `Maya`) if one has
-  posted yet, else a stable `student-<id suffix>` placeholder until it does.
-  Nothing needs to be configured by hand for the tool to keep working the
-  day a second child joins the account.
+  shows up in the feed, it gets its own folder/album automatically, named
+  from a daily sheet's possessive label (e.g. "Maya's" -> `Maya`). Until a
+  daily sheet has named the child (or you add a `students` entry), that
+  child is *deferred*: nothing is downloaded or uploaded for them yet and a
+  high-priority ntfy tells you the new id, so a placeholder folder/album
+  never gets created. Daily sheets normally arrive the same afternoon, so
+  in practice the first evening run already has the name.
 - **`students` overrides** let you rename a child (moment posts never carry
   a name — only a daily sheet's `studentLabel` does — so the fallback name
   isn't always pretty) or point one at a custom folder/album:

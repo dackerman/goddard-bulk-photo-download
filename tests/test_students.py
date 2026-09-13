@@ -404,3 +404,34 @@ class TestUploadStudentDefaultAlbum(unittest.TestCase):
         finally:
             gs.fetch_feed, gs.load_config = orig_fetch, orig_load
         self.assertEqual(seen.get("album_title"), "School - Maya")
+
+
+class TestDeferUnnamedStudent(unittest.TestCase):
+    """A child with only a fallback (id-derived) name is not synced yet: no
+    folder is created, a notification goes out, and named children still sync."""
+    def test_fallback_child_deferred(self):
+        import tempfile, types
+        d = tempfile.mkdtemp()
+        cfg = {"per_student": True, "token": "t", "output_dir": os.path.join(d, "G-{name}"),
+               "gphotos_album": "School - {name}", "gphotos_mode": "off", "ntfy_topic": "x"}
+        results = [
+            {"type": "dailysheet", "studentIds": ["sid1"], "studentLabel": "Maya's"},
+            {"type": "moment", "studentIds": ["sid2"], "date": "2026-09-14T15:00:00Z",
+             "moments": [{"_id": "m1", "type": "image", "thumbnailTransformed": "/x/y_thumb.jpg"}]},
+        ]
+        notes = []
+        orig_notify, orig_folder = gs._notify, gs._sync_folder
+        gs._notify = lambda cfg, title, msg, priority=None: notes.append(title)
+        synced = []
+        gs._sync_folder = lambda args, cfg, out_dir, items, token, **kw: (synced.append(out_dir) or
+            {"ok": 0, "upgraded": 0, "already": 0, "err": 0, "gp_uploaded": 0,
+             "gp_auth_failed": False, "summary": ""})
+        try:
+            args = types.SimpleNamespace(quiet=True, workers=1, no_upload=True, output_dir=None)
+            rc = gs._run_sync_per_student(args, cfg, "t", results, gs._media_items(results))
+        finally:
+            gs._notify, gs._sync_folder = orig_notify, orig_folder
+        self.assertEqual(rc, 0)
+        self.assertEqual(synced, [os.path.join(d, "G-Maya")])
+        self.assertFalse(os.path.exists(os.path.join(d, "G-student-" + "sid2"[-6:])))
+        self.assertTrue(any("waiting for a name" in t for t in notes))
