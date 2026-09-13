@@ -423,6 +423,7 @@ def upload_pending(cfg, save_cfg, state, out_dir, checkpoint, mode=None,
                 else:
                     failed += 1
         checkpoint()
+        print(f"  uploaded {uploaded}/{len(items)}  failed={failed}", flush=True)
 
     return {"uploaded": uploaded, "failed": failed, "album_id": resolved_album_id,
             "candidates": len(items)}
