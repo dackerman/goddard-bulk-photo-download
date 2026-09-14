@@ -7,6 +7,6 @@
   "gphotos_album": "Goddard School - {name}",
   "per_student": true,
   "students": {
-    "<studentId>": { "name": "Maya" }
+    "<studentId>": { "name": "Ada" }
   }
 }

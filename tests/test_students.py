@@ -32,7 +32,7 @@ def _moment(mid, student_ids, date="2026-01-01T12:00:00.000Z"):
 
 def _dailysheet(student_ids, label):
     """A dailysheet result — the only place a child's possessive name (e.g.
-    "Maya's") appears in the feed."""
+    "Ada's") appears in the feed."""
     return {"type": "dailysheet", "studentIds": student_ids, "studentLabel": label}
 
 
@@ -57,18 +57,18 @@ class FakeGP:
 # --- Name derivation ---------------------------------------------------------
 class TestNameDerivation(unittest.TestCase):
     def test_config_override_wins_over_dailysheet_label(self):
-        cfg = {"students": {"s1": {"name": "Maya"}}}
+        cfg = {"students": {"s1": {"name": "Ada"}}}
         self.assertEqual(gs._student_name_and_source("s1", cfg, {"s1": "Someone's"}),
-                          ("Maya", "config"))
+                          ("Ada", "config"))
 
     def test_dailysheet_label_strips_possessive_both_apostrophes(self):
-        for label in ("Maya's", "Maya’s"):
+        for label in ("Ada's", "Ada’s"):
             self.assertEqual(gs._student_name_and_source("s1", {}, {"s1": label}),
-                              ("Maya", "daily sheet"))
+                              ("Ada", "daily sheet"))
 
     def test_label_with_extra_whitespace_is_trimmed(self):
-        self.assertEqual(gs._student_name_and_source("s1", {}, {"s1": "  Maya's  "}),
-                          ("Maya", "daily sheet"))
+        self.assertEqual(gs._student_name_and_source("s1", {}, {"s1": "  Ada's  "}),
+                          ("Ada", "daily sheet"))
 
     def test_fallback_uses_last_6_of_id(self):
         self.assertEqual(gs._student_name_and_source("abcdef123456", {}, {}),
@@ -87,38 +87,38 @@ class TestNameDerivation(unittest.TestCase):
 class TestTemplating(unittest.TestCase):
     def test_output_dir_with_placeholder_is_formatted(self):
         cfg = {"output_dir": "~/Pictures/Goddard-{name}"}
-        self.assertEqual(gs._student_output_dir(cfg, "s1", "Maya"),
-                          os.path.expanduser("~/Pictures/Goddard-Maya"))
+        self.assertEqual(gs._student_output_dir(cfg, "s1", "Ada"),
+                          os.path.expanduser("~/Pictures/Goddard-Ada"))
 
     def test_output_dir_without_placeholder_auto_appends(self):
         cfg = {"output_dir": "~/Pictures/Goddard"}
-        self.assertEqual(gs._student_output_dir(cfg, "s1", "Maya"),
-                          os.path.expanduser("~/Pictures/Goddard-Maya"))
+        self.assertEqual(gs._student_output_dir(cfg, "s1", "Ada"),
+                          os.path.expanduser("~/Pictures/Goddard-Ada"))
 
     def test_album_title_without_placeholder_auto_appends(self):
         cfg = {"gphotos_album": "Goddard School"}
-        self.assertEqual(gs._student_album_title(cfg, "s1", "Maya"), "Goddard School - Maya")
+        self.assertEqual(gs._student_album_title(cfg, "s1", "Ada"), "Goddard School - Ada")
 
     def test_album_title_with_placeholder_is_formatted(self):
         cfg = {"gphotos_album": "Goddard - {name}"}
-        self.assertEqual(gs._student_album_title(cfg, "s1", "Maya"), "Goddard - Maya")
+        self.assertEqual(gs._student_album_title(cfg, "s1", "Ada"), "Goddard - Ada")
 
     def test_two_children_never_collide_when_template_lacks_placeholder(self):
         cfg = {"output_dir": "~/Pictures/Goddard", "gphotos_album": "Goddard"}
-        maya_dir = gs._student_output_dir(cfg, "s1", "Maya")
-        max_dir = gs._student_output_dir(cfg, "s2", "Max")
-        self.assertNotEqual(maya_dir, max_dir)
-        maya_album = gs._student_album_title(cfg, "s1", "Maya")
-        max_album = gs._student_album_title(cfg, "s2", "Max")
-        self.assertNotEqual(maya_album, max_album)
+        ada_dir = gs._student_output_dir(cfg, "s1", "Ada")
+        ben_dir = gs._student_output_dir(cfg, "s2", "Ben")
+        self.assertNotEqual(ada_dir, ben_dir)
+        ada_album = gs._student_album_title(cfg, "s1", "Ada")
+        ben_album = gs._student_album_title(cfg, "s2", "Ben")
+        self.assertNotEqual(ada_album, ben_album)
 
     def test_per_child_override_used_verbatim_without_placeholder(self):
         cfg = {"output_dir": "~/Pictures/Goddard", "students": {"s1": {"output_dir": "/custom/path"}}}
-        self.assertEqual(gs._student_output_dir(cfg, "s1", "Maya"), "/custom/path")
+        self.assertEqual(gs._student_output_dir(cfg, "s1", "Ada"), "/custom/path")
 
     def test_per_child_override_formats_placeholder_if_present(self):
         cfg = {"gphotos_album": "Goddard", "students": {"s1": {"gphotos_album": "Album for {name}"}}}
-        self.assertEqual(gs._student_album_title(cfg, "s1", "Maya"), "Album for Maya")
+        self.assertEqual(gs._student_album_title(cfg, "s1", "Ada"), "Album for Ada")
 
 
 # --- Grouping ------------------------------------------------------------------
@@ -168,7 +168,7 @@ class TestPerChildAlbumCache(unittest.TestCase):
 
         with patch.object(gp, "request", side_effect=fake_request):
             result = gp.resolve_album(cfg, gp._Cache(), lambda c: None,
-                                       title="Maya", cache_get=get, cache_set=set_)
+                                       title="Ada", cache_get=get, cache_set=set_)
         self.assertEqual(result, "new-album-id")
         self.assertEqual(cfg["students"]["s1"]["gphotos_album_id"], "new-album-id")
         self.assertEqual(cfg["gphotos_album_id"], "SHOULD-NOT-CHANGE")
@@ -204,18 +204,18 @@ class TestUploadStudentFiltering(unittest.TestCase):
         shutil.rmtree(self.tmp, ignore_errors=True)
 
     def test_student_by_name_restricts_to_one_child(self):
-        results = [_dailysheet(["s1"], "Maya's"), _dailysheet(["s2"], "Max's")]
+        results = [_dailysheet(["s1"], "Ada's"), _dailysheet(["s2"], "Ben's")]
         fake_gp = FakeGP()
         with patch.object(gs, "load_config", return_value=self._cfg(self.tmp)), \
              patch.object(gs, "_import_gphotos", return_value=fake_gp), \
              patch.object(gs, "fetch_feed", return_value=results):
-            rc = gs.cmd_upload(self._args(student="Maya"))
+            rc = gs.cmd_upload(self._args(student="Ada"))
         self.assertEqual(rc, 0)
         self.assertEqual(len(fake_gp.calls), 1)
-        self.assertIn("Goddard-Maya", fake_gp.calls[0]["out_dir"])
+        self.assertIn("Goddard-Ada", fake_gp.calls[0]["out_dir"])
 
     def test_student_by_id_also_matches(self):
-        results = [_dailysheet(["s1"], "Maya's"), _dailysheet(["s2"], "Max's")]
+        results = [_dailysheet(["s1"], "Ada's"), _dailysheet(["s2"], "Ben's")]
         fake_gp = FakeGP()
         with patch.object(gs, "load_config", return_value=self._cfg(self.tmp)), \
              patch.object(gs, "_import_gphotos", return_value=fake_gp), \
@@ -223,7 +223,7 @@ class TestUploadStudentFiltering(unittest.TestCase):
             rc = gs.cmd_upload(self._args(student="s2"))
         self.assertEqual(rc, 0)
         self.assertEqual(len(fake_gp.calls), 1)
-        self.assertIn("Goddard-Max", fake_gp.calls[0]["out_dir"])
+        self.assertIn("Goddard-Ben", fake_gp.calls[0]["out_dir"])
 
     def test_album_flags_without_student_are_rejected(self):
         with patch.object(gs, "load_config", return_value=self._cfg(self.tmp)), \
@@ -232,17 +232,17 @@ class TestUploadStudentFiltering(unittest.TestCase):
         self.assertEqual(rc, 2)
 
     def test_album_flag_with_student_is_used(self):
-        results = [_dailysheet(["s1"], "Maya's")]
+        results = [_dailysheet(["s1"], "Ada's")]
         fake_gp = FakeGP()
         with patch.object(gs, "load_config", return_value=self._cfg(self.tmp)), \
              patch.object(gs, "_import_gphotos", return_value=fake_gp), \
              patch.object(gs, "fetch_feed", return_value=results):
-            rc = gs.cmd_upload(self._args(student="Maya", album="Custom Album"))
+            rc = gs.cmd_upload(self._args(student="Ada", album="Custom Album"))
         self.assertEqual(rc, 0)
         self.assertEqual(fake_gp.calls[0]["album_title"], "Custom Album")
 
     def test_unknown_student_is_an_error(self):
-        results = [_dailysheet(["s1"], "Maya's")]
+        results = [_dailysheet(["s1"], "Ada's")]
         with patch.object(gs, "load_config", return_value=self._cfg(self.tmp)), \
              patch.object(gs, "_import_gphotos", return_value=FakeGP()), \
              patch.object(gs, "fetch_feed", return_value=results):
@@ -263,11 +263,11 @@ class TestCombinedExitCode(unittest.TestCase):
                 "output_dir": os.path.join(self.tmp, "Goddard-{name}"), "gphotos_album": "Goddard"}
 
     def _run(self, canned):
-        results = [_dailysheet(["s1"], "Maya's"), _dailysheet(["s2"], "Max's")]
+        results = [_dailysheet(["s1"], "Ada's"), _dailysheet(["s2"], "Ben's")]
 
         def fake_sync_folder(args, cfg, out_dir, items, token, prefix="", album_title=None,
                               cache_get=None, cache_set=None):
-            sid = "s1" if prefix.startswith("Maya") else "s2"
+            sid = "s1" if prefix.startswith("Ada") else "s2"
             return dict(canned[sid])
 
         notified = []
@@ -288,8 +288,8 @@ class TestCombinedExitCode(unittest.TestCase):
         rc, notified = self._run(canned)
         self.assertEqual(rc, 0)
         self.assertEqual(len(notified), 1)
-        self.assertIn("Maya 3 new", notified[0])
-        self.assertIn("Max 12 new", notified[0])
+        self.assertIn("Ada 3 new", notified[0])
+        self.assertIn("Ben 12 new", notified[0])
 
     def test_nothing_new_sends_no_notification(self):
         canned = {
@@ -343,8 +343,8 @@ class TestEndToEndPerStudentSync(unittest.TestCase):
             json.dump(cfg, f)
 
         results = [
-            _dailysheet(["s1"], "Maya's"),
-            _dailysheet(["s2"], "Max's"),
+            _dailysheet(["s1"], "Ada's"),
+            _dailysheet(["s2"], "Ben's"),
             _moment("m1", ["s1"]),
             _moment("m2", ["s2"]),
             _moment("m3", ["s1", "s2"]),  # photo of both siblings
@@ -356,20 +356,20 @@ class TestEndToEndPerStudentSync(unittest.TestCase):
             rc = gs.main(["--config", cfg_path, "sync", "--quiet"])
 
         self.assertEqual(rc, 0)
-        maya_dir = os.path.join(self.tmp, "Goddard-Maya")
-        max_dir = os.path.join(self.tmp, "Goddard-Max")
-        self.assertTrue(os.path.isdir(maya_dir))
-        self.assertTrue(os.path.isdir(max_dir))
+        ada_dir = os.path.join(self.tmp, "Goddard-Ada")
+        ben_dir = os.path.join(self.tmp, "Goddard-Ben")
+        self.assertTrue(os.path.isdir(ada_dir))
+        self.assertTrue(os.path.isdir(ben_dir))
 
-        with open(gs._state_path(maya_dir)) as f:
+        with open(gs._state_path(ada_dir)) as f:
             maya_state = json.load(f)
-        with open(gs._state_path(max_dir)) as f:
+        with open(gs._state_path(ben_dir)) as f:
             max_state = json.load(f)
 
         self.assertEqual(set(maya_state["items"].keys()), {"m1", "m3", "m4"})
         self.assertEqual(set(max_state["items"].keys()), {"m2", "m3", "m4"})
         # Each folder's copy of the shared items is independent on disk.
-        for state, out_dir in ((maya_state, maya_dir), (max_state, max_dir)):
+        for state, out_dir in ((maya_state, ada_dir), (max_state, ben_dir)):
             for entry in state["items"].values():
                 self.assertTrue(os.path.isfile(os.path.join(out_dir, entry["file"])))
 
@@ -387,7 +387,7 @@ class TestUploadStudentDefaultAlbum(unittest.TestCase):
         cfg = {"per_student": True, "token": "t", "output_dir": os.path.join(d, "G-{name}"),
                "gphotos_album": "School - {name}", "gphotos_mode": "album",
                "gphotos_refresh_token": "r", "gphotos_client_id": "c", "gphotos_client_secret": "s"}
-        results = [{"type": "dailysheet", "studentIds": ["sid1"], "studentLabel": "Maya's"}]
+        results = [{"type": "dailysheet", "studentIds": ["sid1"], "studentLabel": "Ada's"}]
         seen = {}
         class FakeGP:
             AuthError = Exception
@@ -398,12 +398,12 @@ class TestUploadStudentDefaultAlbum(unittest.TestCase):
         gs.fetch_feed = lambda tok: results
         gs.load_config = lambda p: dict(cfg)
         try:
-            args = types.SimpleNamespace(config="x", student="Maya", album=None, album_id=None,
+            args = types.SimpleNamespace(config="x", student="Ada", album=None, album_id=None,
                                          output_dir=None, workers=1, limit=None, dry_run=True, mode="album")
             gs._upload_per_student(args, dict(cfg), FakeGP(), "album")
         finally:
             gs.fetch_feed, gs.load_config = orig_fetch, orig_load
-        self.assertEqual(seen.get("album_title"), "School - Maya")
+        self.assertEqual(seen.get("album_title"), "School - Ada")
 
 
 class TestDeferUnnamedStudent(unittest.TestCase):
@@ -415,7 +415,7 @@ class TestDeferUnnamedStudent(unittest.TestCase):
         cfg = {"per_student": True, "token": "t", "output_dir": os.path.join(d, "G-{name}"),
                "gphotos_album": "School - {name}", "gphotos_mode": "off", "ntfy_topic": "x"}
         results = [
-            {"type": "dailysheet", "studentIds": ["sid1"], "studentLabel": "Maya's"},
+            {"type": "dailysheet", "studentIds": ["sid1"], "studentLabel": "Ada's"},
             {"type": "moment", "studentIds": ["sid2"], "date": "2026-09-14T15:00:00Z",
              "moments": [{"_id": "m1", "type": "image", "thumbnailTransformed": "/x/y_thumb.jpg"}]},
         ]
@@ -432,6 +432,6 @@ class TestDeferUnnamedStudent(unittest.TestCase):
         finally:
             gs._notify, gs._sync_folder = orig_notify, orig_folder
         self.assertEqual(rc, 0)
-        self.assertEqual(synced, [os.path.join(d, "G-Maya")])
+        self.assertEqual(synced, [os.path.join(d, "G-Ada")])
         self.assertFalse(os.path.exists(os.path.join(d, "G-student-" + "sid2"[-6:])))
         self.assertTrue(any("waiting for a name" in t for t in notes))

@@ -414,7 +414,7 @@ def _feed_student_ids(results):
 
 def _student_labels(results):
     """Map studentId -> a dailysheet's possessive `studentLabel` (e.g.
-    "Maya's") mentioning it — the only place a child's name appears in the
+    "Ada's") mentioning it — the only place a child's name appears in the
     feed. First one found wins; `setdefault` so a later match can't override."""
     labels = {}
     for r in results:
@@ -771,7 +771,7 @@ def _sync_folder(args, cfg, out_dir, items, token, prefix="", album_title=None,
     state save, and (if enabled) the Google Photos upload pass — for one
     folder. `items` is the slice of the feed's media items that belong here
     (all of it outside per-student mode, one child's share otherwise).
-    `prefix` is prepended to progress/summary lines (e.g. "Maya: "). Returns
+    `prefix` is prepended to progress/summary lines (e.g. "Ada: "). Returns
     a dict of counters the caller uses to build a summary and notification;
     does not itself print a combined summary or send any notification, so
     the single- and multi-child drivers can each do that their own way."""
@@ -1010,7 +1010,7 @@ def cmd_students(args):
         print(f"{c['id']:<26} {c['name']:<14} {c['name_source']:<11} "
               f"{post_counts.get(c['id'], 0):>5}  {exists:<7} {c['out_dir']}  |  {c['album_title']}")
     print('\nRename a child or override its folder/album with a "students" entry in the '
-          'config, e.g. {"students": {"<id>": {"name": "Max"}}} — see the README\'s '
+          'config, e.g. {"students": {"<id>": {"name": "Ben"}}} — see the README\'s '
           '"Multiple children" section.')
     return 0
 

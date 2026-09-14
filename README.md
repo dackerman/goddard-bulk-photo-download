@@ -246,13 +246,13 @@ mixing everyone into one library:
 
 - **`output_dir`/`gphotos_album` templates.** Either may contain a `{name}`
   placeholder, filled in per child (`~/Pictures/Goddard-{name}` ->
-  `~/Pictures/Goddard-Maya`, `~/Pictures/Goddard-Max`). If you turn on
+  `~/Pictures/Goddard-Ada`, `~/Pictures/Goddard-Ben`). If you turn on
   `per_student` but forget the placeholder, `-{name}` (folder) or `
   - {name}` (album) is appended automatically so two children's libraries
   can never collide.
 - **A new child needs zero setup.** The first time a sibling's student id
   shows up in the feed, it gets its own folder/album automatically, named
-  from a daily sheet's possessive label (e.g. "Maya's" -> `Maya`). Until a
+  from a daily sheet's possessive label (e.g. "Ada's" -> `Ada`). Until a
   daily sheet has named the child (or you add a `students` entry), that
   child is *deferred*: nothing is downloaded or uploaded for them yet and a
   high-priority ntfy tells you the new id, so a placeholder folder/album
@@ -262,9 +262,9 @@ mixing everyone into one library:
   a name — only a daily sheet's `studentLabel` does — so the fallback name
   isn't always pretty) or point one at a custom folder/album:
   ```json
-  { "students": { "<studentId>": { "name": "Max",
-                                    "output_dir": "~/Pictures/Max-Goddard",
-                                    "gphotos_album": "Max at Goddard" } } }
+  { "students": { "<studentId>": { "name": "Ben",
+                                    "output_dir": "~/Pictures/Ben-Goddard",
+                                    "gphotos_album": "Ben at Goddard" } } }
   ```
   Every key is optional. Find a child's id with `./goddard_sync.py students`.
 - **A post tagged with both kids** (e.g. a photo of two siblings together)
@@ -272,7 +272,7 @@ mixing everyone into one library:
   that's not a duplicate within either library. A post tagged with no
   student at all goes to every child.
 - **One notification per run**, not one per child: a single ntfy titled
-  e.g. `Goddard: Maya 3 new, Max 12 new` (a child with nothing new is
+  e.g. `Goddard: Ada 3 new, Ben 12 new` (a child with nothing new is
   omitted from the title), and `sync`'s exit code is the worst across
   children.
 - **`upload --student NAME_OR_ID`** restricts a manual upload to one child
@@ -364,7 +364,7 @@ older guides will show different page names.
 
    ```bash
    # edit ~/.config/goddard-photo-sync/config.json:
-   #   "gphotos_mode": "library"   (or "album", with "gphotos_album": "Maya")
+   #   "gphotos_mode": "library"   (or "album", with "gphotos_album": "Ada")
 
    ./goddard_sync.py upload --dry-run   # see what would be uploaded first
    ./goddard_sync.py upload
