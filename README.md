@@ -1,12 +1,16 @@
-# goddard-bulk-photo-download
+# Goddard School bulk photo downloader
 
 ![A dad at a laptop downloading photos of his toddler from a friendly cloud](docs/hero.png)
 
-Download every photo *and video* of your child from the **Goddard Family Hub**
-app, at full resolution, and keep a local folder in sync automatically.
+Are you a dad (or mom) and love your kid so much that you want to have EVERY photo your Goddard school teachers take
+of your little one? Are you frustrated that all you can do is download individual images to your phone and aren't sure
+whether you forgot to get some months ago? If so, you've come to the right place.
 
-The Goddard Family Hub app shows you photos your daycare posts, but gives you no
-way to bulk-export them — you can only save pictures one at a time. This tool
+This script downloads every photo *and video* of your child from the **Goddard Family Hub**
+app, at full resolution, and keeps a local folder in sync automatically. It can also automatically
+save your photos to google photos (in an album or not) so you don't have to lift a finger.
+
+This tool
 talks to the same backend API the app uses and downloads them all, then runs on
 a schedule to pull each new day's photos.
 
