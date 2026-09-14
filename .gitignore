@@ -8,6 +8,7 @@ photos/
 *.jpg
 *.jpeg
 *.png
+!docs/hero.png
 *.heic
 *.mp4
 *.mov

@@ -1,5 +1,7 @@
 # goddard-bulk-photo-download
 
+![A dad at a laptop downloading photos of his toddler from a friendly cloud](docs/hero.png)
+
 Download every photo *and video* of your child from the **Goddard Family Hub**
 app, at full resolution, and keep a local folder in sync automatically.
 
