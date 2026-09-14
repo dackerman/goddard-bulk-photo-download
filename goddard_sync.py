@@ -539,7 +539,8 @@ def _group_by_student(items, student_ids):
     for it in items:
         ids = it.get("student_ids") or []
         for sid in (ids if ids else student_ids):
-            groups[sid].append(it)
+            if sid in groups:  # ids not being routed this run (e.g. a deferred child)
+                groups[sid].append(it)
     return groups
 
 
