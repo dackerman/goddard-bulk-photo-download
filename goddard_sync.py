@@ -660,7 +660,18 @@ def cmd_sync(args):
         os.makedirs(out_dir, exist_ok=True)
 
     try:
-        return _run_sync(args, cfg, token, out_dir)
+        result = _run_sync(args, cfg, token, out_dir)
+        if cfg.get("gdrive_sync_enabled") and not getattr(args, "no_drive", False):
+            from types import SimpleNamespace
+            from goddard_documents import cmd_documents
+            from goddard_gdrive import command as drive_command
+            document_result = cmd_documents(SimpleNamespace(
+                config=args.config, output_dir=args.output_dir, refresh=False))
+            result = max(result, document_result)
+            if not document_result:
+                result = max(result, drive_command(SimpleNamespace(
+                    cmd="drive-upload", config=args.config, prepare_only=False, dry_run=False)))
+        return result
     except urllib.error.HTTPError as e:
         if e.code in (401, 403):
             print("Token rejected (expired?). Re-run `goddard_sync.py login`.",
@@ -1193,7 +1204,34 @@ def main(argv=None):
                     help="suppress per-100 progress lines (handy under systemd)")
     ps.add_argument("--no-upload", action="store_true",
                     help="skip the Google Photos upload pass even if gphotos_mode is enabled")
+    ps.add_argument("--no-drive", action="store_true",
+                    help="skip scheduled document downloads and Google Drive uploads")
     ps.set_defaults(func=cmd_sync)
+
+    pd = sub.add_parser("documents", parents=[common],
+                        help="download offline daily sheets, lessons, and newsletters")
+    pd.add_argument("--output-dir", help="override the configured output dir")
+    pd.add_argument("--refresh", action="store_true",
+                    help="re-fetch saved documents to pick up later edits")
+    def run_documents(args):
+        from goddard_documents import cmd_documents
+        return cmd_documents(args)
+    pd.set_defaults(func=run_documents)
+
+    for command_name, help_text in (
+            ("drive-login", "authorize the configured Google Drive folders"),
+            ("drive-upload", "upload document PDFs and attachments to Google Drive")):
+        drive_parser = sub.add_parser(command_name, parents=[common], help=help_text)
+        if command_name == "drive-login":
+            drive_parser.add_argument("--no-browser", action="store_true")
+            drive_parser.add_argument("--url-file", help="write the sign-in URL to a private local file")
+        else:
+            drive_parser.add_argument("--prepare-only", action="store_true", help="render PDFs without accessing Drive")
+            drive_parser.add_argument("--dry-run", action="store_true", help="verify Drive destinations without uploading")
+        def run_drive(args):
+            from goddard_gdrive import command
+            return command(args)
+        drive_parser.set_defaults(func=run_drive)
 
     pt = sub.add_parser("status", parents=[common],
                         help="show current configuration and photo count")

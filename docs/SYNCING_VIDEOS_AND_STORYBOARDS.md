@@ -5,10 +5,13 @@
 that endpoint behaves, but you don't need to do anything extra to get videos;
 just run `sync`.
 
-**Storyboards are still not synced.** This note records exactly how you'd go
-about it, so nobody has to spin up an emulator again to rediscover it.
-Everything below was confirmed by calling the live API directly with a normal
-account bearer token (no app or emulator needed).
+**Full storyboards are now downloaded by `goddard_sync.py documents`.**
+The app bundle supplies the missing step: request
+`https://my.kaymbu.com/storyboards/shared?id=<encrypted.id>&v=<encrypted.v>`.
+The server decrypts that pair and returns the full rendered HTML, including
+attachment links. No client-side decryption, browser, or emulator is needed.
+`goddard_documents.py` saves the content and linked assets for offline use.
+The endpoint notes below describe the implemented export paths.
 
 Both features hang off one endpoint the app already uses:
 
@@ -82,49 +85,38 @@ downloads `CDN + videoSource` to `<canonical-name>.mp4` with rendition
 
 ---
 
-## Storyboards  — only the cover thumbnail is in the clear
+## Storyboards — full offline documents
 
-Storyboards are the multi-page "newsletter" posts. The detail call works, but the
-body is mostly encrypted:
+`GET /feed/details/storyboard/<storyboardId>` returns an `encrypted` object
+with `id` and `v`. These values are access parameters for the shared document:
 
 ```
-GET /kaymbu-parentapp/api/feed/details/storyboard/<storyboardId>
+https://my.kaymbu.com/storyboards/shared?id=<encrypted.id>&v=<encrypted.v>&excludeBanner=1&source=parentapp
 ```
 
-```json
-{
-  "_id": "69ef6f3748187b0114e6e01a",
-  "thumbnailUrl": "https://dw74ugoaeqr7w.cloudfront.net/media/.../..._display.jpg?fit=crop&w=230&h=230...",
-  "encrypted": { "v": "0428...", "id": "2577...long hex..." }
-}
+The server returns the full rendered HTML. The `documents` command saves it,
+localizes image URLs, and downloads linked PDF/Office attachments. The signed
+URL is not printed or stored in the document index.
+
+## Daily sheets and lesson plans
+
+The daily-sheet detail ID is **not** the feed post `_id`. Join the following
+fields from `row.dailysheet` with `|`, then URL-encode the result:
+
+```
+classroom|student|fromDateISOString|timezoneOffset|language
 ```
 
-- `thumbnailUrl` is a small cropped cover image — easy to grab, but only the
-  cover.
-- The storyboard's real content (its pages and the full-size photos on them) is
-  inside the `encrypted` blob. The app doesn't parse it; it hands the storyboard
-  to a **webview** at `https://my.kaymbu.com/storyboards/<...>`, which decrypts
-  and renders it client-side.
+Request `/feed/details/dailysheet/<encoded-id>` and fetch the returned
+`dailysheetUrl`. This is server-rendered HTML, including the full Lessons
+section when available. The exporter also saves that section as a separate
+page under `Documents/Lesson Plans/`.
 
-So there is no plain JSON list of a storyboard's photos to loop over. Options, in
-order of effort:
-
-1. **Do nothing (recommended).** The photos featured in a storyboard are almost
-   always also posted individually as normal `moment`s, so the regular photo
-   `sync` already has them at full resolution. Storyboards mostly add layout and
-   text, not unique images.
-2. **Grab the cover only.** If you just want a copy of each newsletter's cover,
-   download `thumbnailUrl` (strip the `?fit=crop...` query for the larger
-   `_display.jpg`).
-3. **Render the webview.** Drive `https://my.kaymbu.com/storyboards/<id>` in a
-   headless browser (Playwright/Puppeteer) with the session, let it decrypt, and
-   scrape the rendered `<img>`/page URLs or print each page to PDF. This is the
-   only way to get storyboard-exclusive imagery, and it's the one part that needs
-   a browser (not an emulator).
-4. **Reverse the `encrypted` payload.** The `{v, id}` pair is decrypted by JS
-   served to the webview. You could pull that JS from `my.kaymbu.com` and
-   reproduce the decryption to get a clean content JSON. Most involved; only
-   worth it for a fully headless storyboard export.
+Standalone `lesson-planner` posts use `lessonPlanMessageId`; their detail
+response contains `lessonPlanUrl`, resolved against `https://my.kaymbu.com`.
+The account used to verify this implementation had no standalone lesson-plan
+posts; this URL mapping comes from the app bundle. Daily sheets and newsletter
+attachments were verified with live downloads.
 
 ---
 

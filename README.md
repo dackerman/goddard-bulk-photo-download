@@ -1,4 +1,4 @@
-# Goddard School bulk photo downloader
+# Goddard School photo and document sync
 
 ![A dad at a laptop downloading photos of his toddler from a friendly cloud](docs/hero.png)
 
@@ -7,15 +7,16 @@ of your little one? Are you frustrated that all you can do is download individua
 whether you forgot to get some months ago? If so, you've come to the right place.
 
 This script downloads every photo *and video* of your child from the **Goddard Family Hub**
-app, at full resolution, and keeps a local folder in sync automatically. It can also automatically
-save your photos to google photos (in an album or not) so you don't have to lift a finger.
+app at the best available resolution and keeps a local folder in sync automatically.
+It also saves daily sheets, lesson content, newsletters, and their attachments.
+Optional uploads send photos and videos to **Google Photos** and document PDFs to
+**Google Drive**, with separate destinations for each child.
 
-This tool
-talks to the same backend API the app uses and downloads them all, then runs on
-a schedule to pull each new day's photos.
+The weekday sync can download new school posts and upload them to both services.
+Documents are also available as an offline archive with their images saved locally.
 
-It only ever accesses **your own account's** data: the exact photos the app
-already shows you, using your own login.
+It only accesses **your own account's** school data, using your login. Google
+Drive access is limited to the folders you select and files the app creates.
 
 > Unofficial. Not affiliated with, endorsed by, or supported by Goddard Systems,
 > The Goddard School, or Kaymbu. Use it with your own account and your own data.
@@ -36,6 +37,12 @@ API. This tool reproduces the calls that matter:
    below), so `sync` sniffs the downloaded bytes rather than trusting the URL.
 3. **Video detail endpoint.** A video moment only exposes a thumbnail still in
    the feed; `GET /feed/details/moment/<id>` returns the actual `.mp4` path.
+4. **Documents.** Daily-sheet and newsletter detail endpoints return shared
+   document URLs. `documents` saves the full HTML, images, lesson sections,
+   and linked attachments for offline reading.
+5. **Drive uploads.** `drive-upload` converts the archived HTML to PDFs and
+   uploads to your selected folders. Checksums skip unchanged files; stable
+   Drive IDs let changed documents update in place and interrupted runs resume.
 
 `login` stores the token locally; `sync` reads the feed and downloads any
 photos/videos you don't already have, at the best rendition currently
@@ -45,8 +52,10 @@ available. `sync` is what you schedule.
 
 - Python 3.9+ (standard library only — no `pip install` needed)
 - A Goddard Family Hub account
+- Optional for Google Drive PDFs: Node.js, Playwright, and Chromium
+  (see [Drive setup](#sync-documents-to-google-drive))
 - Optional: Pillow + pillow-heif, only for `tools/import_from_export.py`
-  (see [Limitations](#limitations)); the CLI itself never needs them
+  (see [Limitations](#limitations))
 
 ## Setup
 
@@ -80,7 +89,10 @@ Every command accepts `--config PATH` (default
 | Command | What it does | Useful flags |
 |---|---|---|
 | `login` | One-time Kaymbu login; stores the token | `--user`, `--code`, `--output-dir` |
-| `sync` | Download new photos/videos, retry upgrades, then upload to Google Photos if enabled | `--workers N`, `--quiet`, `--no-upload`, `--output-dir` |
+| `sync` | Download photos/videos and upload to Google Photos; also sync documents to Drive when enabled | `--workers N`, `--quiet`, `--no-upload`, `--no-drive`, `--output-dir` |
+| `documents` | Save offline daily sheets, lesson sections, newsletters, and attachments | `--refresh`, `--output-dir` |
+| `drive-login` | Authorize selected Drive folders using Google Picker | `--no-browser`, `--url-file PATH` |
+| `drive-upload` | Render document PDFs and upload documents/attachments to Drive | `--prepare-only`, `--dry-run` |
 | `status` | Config, token, per-folder counts, Google Photos mode/login/pending | |
 | `students` | Table of every child in the feed and how their name/folder/album resolve | |
 | `gphotos-login` | One-time Google OAuth; stores the refresh token | `--client-id`, `--client-secret`, `--no-browser` |
@@ -184,8 +196,8 @@ journalctl --user -u goddard-photo-sync.service -f       # watch the logs
 ## Configuration
 
 Config lives at `~/.config/goddard-photo-sync/config.json` (see
-`config.example.json`). Every field can also be set via environment variable,
-which takes precedence — handy for containers or CI.
+`config.example.json`). Fields with an environment variable listed below can
+also be overridden through the environment. Drive settings are configured in JSON.
 
 | Field           | Env var                 | Meaning                                              |
 |-----------------|-------------------------|------------------------------------------------------|
@@ -203,7 +215,17 @@ which takes precedence — handy for containers or CI.
 | `gphotos_album`         | `GODDARD_GPHOTOS_ALBUM`         | Album title for mode `album` (default `Goddard`); may contain `{name}` — see [Multiple children](#multiple-children) |
 | `gphotos_album_id`      | `GODDARD_GPHOTOS_ALBUM_ID`      | Cached id of the app-created album (resolved automatically); ignored in per-student mode |
 | `per_student`           | `GODDARD_PER_STUDENT`           | `false` (default) / `true` — route each child to its own folder/album, see [Multiple children](#multiple-children) |
-| `students`              | —                                | Optional per-child overrides (`name`, `output_dir`, `gphotos_album`, `gphotos_album_id`), keyed by student id |
+| `students`              | —                                | Optional per-child overrides (`name`, `output_dir`, `gphotos_album`, `gphotos_album_id`, `gdrive_folder_id`), keyed by student id |
+
+| Drive field | Meaning |
+|---|---|
+| `gdrive_folder_id` | Existing destination folder ID; set per child under `students`, or at the top level in single-folder mode |
+| `gdrive_sync_enabled` | Set to `true` after setup to include documents and Drive uploads in `sync`; off by default |
+| `gdrive_client_id`, `gdrive_client_secret` | Optional Desktop OAuth client; defaults to the Google Photos client during sign-in |
+| `gdrive_refresh_token` | Written by `drive-login`; keep private |
+| `gdrive_node` | Node executable; default `node` |
+| `gdrive_node_modules` | Optional module directory passed as `NODE_PATH` to find Playwright |
+| `gdrive_chromium` | Optional browser executable; otherwise uses Playwright's installed Chromium |
 
 ### Push notifications
 
@@ -402,13 +424,142 @@ it clearly (exit code `2`, and — for `sync` — a high-priority ntfy titled
   config file and are never logged or sent anywhere but Google's own OAuth
   and Photos Library API hosts.
 
+## Daily sheets, lessons, and newsletters
+
+```bash
+python3 goddard_sync.py documents
+# Re-fetch older documents after the school edits them:
+python3 goddard_sync.py documents --refresh
+```
+
+Saves an offline `Documents/index.html` inside each configured child’s output
+folder, with dated daily sheets, separate pages containing their Lessons
+sections, full newsletters, and linked PDF/Office attachments. Images are
+saved locally, so the documents can be read without logging in or connecting
+to Kaymbu. Open the index in a browser; use the browser’s Print command if you
+want a PDF copy. External links other than downloaded attachments still need
+an internet connection.
+
+The command supports the same config and per-student output routing as photos,
+plus `--output-dir`. It skips complete older downloads, retries incomplete
+ones, and refreshes today’s daily sheet. Use `--refresh` for later edits to
+older sheets. Standalone lesson-plan posts are included when present; some
+schools instead put their lesson content inside daily sheets and newsletters.
+Document downloads run separately by default; enabling Google Drive sync
+also includes them in `sync` and its existing photo timer.
+They are not uploaded to Google Photos.
+
+## Sync documents to Google Drive
+
+`drive-upload` renders the offline HTML documents to PDFs and uploads them,
+along with original attachments, under the configured destination for each
+child. It creates Daily Sheets, Lesson Plans, Newsletters, and Attachments
+subfolders as needed. Repeated runs skip identical files and update changed
+files in place; unrelated Drive files are not overwritten or deleted.
+
+1. Enable **Google Drive API** and **Google Picker API** in your existing
+   Google Cloud OAuth project. The existing Desktop client used for Google
+   Photos can be reused; its Photos refresh token remains separate.
+2. Add `gdrive_folder_id` to each entry in the `students` config map. For
+   single-folder mode, set `gdrive_folder_id` at the top level instead.
+3. Run `python3 goddard_sync.py drive-login` and select the configured folders
+   in Google's Picker. This requests only `drive.file` access to selected
+   folders and app-created files, not your entire Drive.
+4. Run the commands below, then set `"gdrive_sync_enabled": true` in config
+   to include document downloads and Drive uploads in the existing `sync`
+   command and its weekday timer.
+
+```bash
+python3 goddard_sync.py documents
+python3 goddard_sync.py drive-upload --prepare-only  # local PDFs only
+python3 goddard_sync.py drive-upload --dry-run      # verify writable destinations
+python3 goddard_sync.py drive-upload
+```
+
+For example, merge the following into your existing private config, using IDs
+from `students` and from each Drive folder's URL (`/drive/folders/<ID>`).
+Keep the existing login and Google Photos settings:
+
+```json
+{
+  "per_student": true,
+  "output_dir": "~/Pictures/Goddard-{name}",
+  "gdrive_sync_enabled": true,
+  "students": {
+    "<first-student-id>": {"name": "Ada", "gdrive_folder_id": "<Ada-folder-id>"},
+    "<second-student-id>": {"name": "Ben", "gdrive_folder_id": "<Ben-folder-id>"}
+  }
+}
+```
+
+Each selected folder gets this structure (empty categories are omitted):
+
+```text
+Ada's existing Drive folder/
+├── Daily Sheets/   # complete dated PDFs
+├── Lesson Plans/   # lesson sections extracted from daily sheets
+├── Newsletters/    # complete newsletter PDFs
+└── Attachments/    # original PDF/Office/ZIP attachments
+```
+
+Install the optional PDF dependencies separately from the Python tool:
+
+```bash
+npm install --prefix "$HOME/.local/share/goddard-pdf" playwright
+"$HOME/.local/share/goddard-pdf/node_modules/.bin/playwright" install chromium
+```
+
+Set `gdrive_node_modules` in config to the absolute path of that installation's
+`node_modules` directory, for example `/home/you/.local/share/goddard-pdf/node_modules`.
+Use an absolute `gdrive_node` path if Node is not on your systemd service's PATH.
+
+PDF conversion requires Node.js, Playwright, and Chromium. Set `gdrive_node`,
+`gdrive_node_modules` (the module directory used as `NODE_PATH`), and
+`gdrive_chromium` to your installed runtimes if they aren't found by default.
+PDFs and their content fingerprints are cached in `Documents/Drive PDFs/`.
+The renderer blocks network requests and uses only the archived local images.
+Standalone attachment files retain their original format.
+
+`sync --no-drive` skips the document/Drive pass for one run. Separate
+`gdrive_client_id` and `gdrive_client_secret` settings are optional; they
+otherwise fall back to the Google Photos OAuth client during sign-in.
+`gdrive_refresh_token` is stored in the private config, and access tokens stay
+in memory. Do not share that config or the hidden state files.
+
+Uploads use pre-generated Drive IDs, checksum checks, and a per-folder lock
+so interrupted uploads can resume without creating duplicates. Moving or
+trashing a managed Drive file causes an explicit error instead of silently
+writing somewhere unexpected. The exporter does not change sharing settings; uploads inherit the destination
+folder's existing sharing. PDF attachments are also saved separately under
+Attachments; links in the original documents may still point to Kaymbu or local
+archive paths.
+
+### Drive troubleshooting
+
+- **Access denied:** enable Google Drive API in the same Cloud project as the
+  OAuth client. Run `drive-login` again if the configured folders were not
+  selected or their permissions changed.
+- **Both folders must be selected:** select all configured destinations in the
+  Picker before clicking Insert. Authorization is checked against their IDs.
+- **Cannot find Playwright/Chromium:** check `gdrive_node_modules` and install
+  Chromium using the command above, or set `gdrive_chromium` to an existing
+  browser executable.
+- **A managed file was moved or trashed:** restore it to its original synced
+  folder before retrying. The uploader will not follow it to another location.
+- **An older sheet was edited:** run `documents --refresh`, then `drive-upload`.
+  Normal runs refresh today's sheet and skip complete older downloads.
+
+The existing timer runs on weekdays at 7 p.m. in the machine's local timezone,
+with up to two minutes of jitter. With `gdrive_sync_enabled` set, `sync` runs
+photos first, then downloads documents and uploads their PDFs. A failed document
+pass prevents stale document uploads and returns a nonzero exit code. Drive
+failures are printed to the service journal; there is no separate Drive push
+notification. See `journalctl --user -u goddard-photo-sync.service` for details.
+
 ## Limitations
 
-- **Photos and videos only.** The feed also contains daily sheets and
-  storyboards (newsletters); these are not downloaded by `sync`. Storyboard
-  covers are recoverable via a separate detail endpoint — see
-  [docs/SYNCING_VIDEOS_AND_STORYBOARDS.md](docs/SYNCING_VIDEOS_AND_STORYBOARDS.md)
-  for the method if you want to add that too.
+- **Separate document command.** `sync` downloads photos and videos;
+  run `documents` for daily sheets, lessons, and newsletters.
 - **Originals get archived, so sync promptly.** Kaymbu moves every
   full-resolution original into AWS Glacier Deep Archive (the CDN reports
   `x-amz-storage-class: DEEP_ARCHIVE` on all of them). A download then
@@ -459,7 +610,14 @@ derivation and sanitization, `{name}` template formatting (including the
 auto-appended suffix), grouping posts by student id, per-child album-id
 caching, `upload --student`, the combined per-run exit code/notification, and
 an end-to-end synthetic two-student sync. No network access required for any
-test.
+test. `tests/test_documents.py` covers composite daily-sheet IDs, offline
+assets and attachments, lesson extraction, and resuming incomplete downloads.
+`tests/test_gdrive.py` covers scoped folder authorization, per-child destinations,
+create/skip/update behavior, recovery after lost responses, and scheduled sync.
+
+## About Contributions
+
+> *About Contributions:* Please don't take this the wrong way, but I do not accept outside contributions for any of my projects. I simply don't have the mental bandwidth to review anything, and it's my name on the thing, so I'm responsible for any problems it causes; thus, the risk-reward is highly asymmetric from my perspective. I'd also have to worry about other "stakeholders," which seems unwise for tools I mostly make for myself for free. Feel free to submit issues, and even PRs if you want to illustrate a proposed fix, but know I won't merge them directly. Instead, I'll have Claude or Codex review submissions via `gh` and independently decide whether and how to address them. Bug reports in particular are welcome. Sorry if this offends, but I want to avoid wasted time and hurt feelings. I understand this isn't in sync with the prevailing open-source ethos that seeks community contributions, but it's the only way I can move at this velocity and keep my sanity.
 
 ## License
 

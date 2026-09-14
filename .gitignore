@@ -21,3 +21,6 @@ __pycache__/
 *.pyc
 .venv/
 .DS_Store
+
+# Offline document exports
+Documents/
