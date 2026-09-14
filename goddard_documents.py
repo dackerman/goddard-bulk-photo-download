@@ -9,6 +9,7 @@ import hashlib
 import html
 from html.parser import HTMLParser
 import json
+import os
 from pathlib import Path
 import re
 import time
@@ -181,6 +182,118 @@ def page(title, body):
             '</h1>' + body + '</body></html>').encode()
 
 
+
+class LessonText(HTMLParser):
+    """Extract readable paragraphs from lesson HTML without CSS or scripts."""
+    BLOCKS = {'h1', 'h2', 'h3', 'h4', 'p', 'div', 'section', 'article', 'tr', 'ul', 'ol'}
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self.skip = 0
+
+    def handle_starttag(self, tag, attrs):
+        if self.skip:
+            if tag not in VOID:
+                self.skip += 1
+            return
+        attrs = dict(attrs)
+        hidden = ('hidden' in attrs or attrs.get('aria-hidden') == 'true' or
+                  re.search(r'display\s*:\s*none', attrs.get('style', ''), re.I))
+        if tag in ('head', 'script', 'style') or hidden:
+            if tag not in VOID:
+                self.skip = 1
+        elif tag in self.BLOCKS:
+            self.parts.append('\n\n')
+        elif tag == 'br':
+            self.parts.append('\n')
+        elif tag == 'li':
+            self.parts.append('\n- ')
+
+    def handle_endtag(self, tag):
+        if self.skip:
+            if tag not in VOID:
+                self.skip -= 1
+        elif tag in self.BLOCKS:
+            self.parts.append('\n\n')
+        elif tag == 'li':
+            self.parts.append('\n')
+        elif tag in ('td', 'th', 'span'):
+            self.parts.append(' ')
+
+    def handle_startendtag(self, tag, attrs):
+        self.handle_starttag(tag, attrs)
+        if tag not in VOID:
+            self.handle_endtag(tag)
+
+    def handle_data(self, data):
+        if not self.skip:
+            self.parts.append(data)
+
+    def text(self):
+        text = ''.join(self.parts).replace('\xa0', ' ')
+        lines = [re.sub(r'[^\S\n]+', ' ', line).strip() for line in text.splitlines()]
+        text = re.sub(r'\n{3,}', '\n\n', '\n'.join(lines)).strip()
+        text = re.sub(r'(?m)^(- [^\n]+)\n{2,}(?=- )', r'\1\n', text)
+        return text + '\n'
+
+
+def export_lesson_text(root, state):
+    """Backfill text from saved HTML and register it for ordinary Drive sync."""
+    root = Path(root)
+    count = 0
+    combined = []
+    for record in sorted(state.values(), key=lambda row: row.get('date', '')):
+        for filename in list(record['files']):
+            if not filename.startswith('Lesson Plans/') or not filename.endswith('.html'):
+                continue
+            source = (root / filename).resolve()
+            if not source.is_relative_to(root.resolve()):
+                raise ValueError('Lesson source is outside the archive')
+            parser = LessonText()
+            parser.feed(source.read_text(encoding='utf-8'))
+            content = parser.text()
+            if not content.strip():
+                raise ValueError('Lesson page contains no text')
+            relative = str(Path(filename).with_suffix('.txt'))
+            target = root / relative
+            data = content.encode('utf-8')
+            if not target.exists() or target.read_bytes() != data:
+                atomic_write(target, data)
+            if relative not in record['files']:
+                record['files'].append(relative)
+            combined.append(content.rstrip())
+            count += 1
+    if combined:
+        atomic_write(root / 'all-lesson-text.txt', ('\n\n' + '=' * 72 + '\n\n').join(combined).encode('utf-8') + b'\n')
+    return count
+
+
+def cmd_lesson_text(args):
+    """Extract saved lesson pages locally; neither login nor network is needed."""
+    cfg = gs.load_config(args.config)
+    if args.output_dir:
+        cfg['output_dir'] = args.output_dir
+    folders = ([c['out_dir'] for c in gs._resolve_children(cfg, [])]
+               if cfg.get('per_student') else [os.path.expanduser(cfg['output_dir'])])
+    if not folders:
+        print('No child folders configured; add student names or use single-folder mode.', file=gs.sys.stderr)
+        return 1
+    result = 0
+    for folder in folders:
+        root = Path(folder) / 'Documents'
+        try:
+            state_path = root / '.documents-state.json'
+            state = json.loads(state_path.read_text())
+            count = export_lesson_text(root, state)
+            atomic_write(state_path, json.dumps(state, indent=2).encode())
+            print(f'{root}: extracted {count} lesson text files.')
+        except (OSError, ValueError) as exc:
+            print(f'Lesson text export failed ({type(exc).__name__}) in {root}.', file=gs.sys.stderr)
+            result = 1
+    return result
+
+
 def sync_folder(rows, token, output_dir, refresh=False):
     root = Path(output_dir).expanduser() / 'Documents'
     root.mkdir(parents=True, exist_ok=True)
@@ -243,6 +356,14 @@ def sync_folder(rows, token, output_dir, refresh=False):
             failed += 1
         if index % 20 == 0 or index == len(rows):
             print(f'Documents: {index}/{len(rows)}, saved {downloaded}, existing {skipped}, failed {failed}', flush=True)
+    try:
+        text_count = export_lesson_text(root, state)
+        if text_count:
+            atomic_write(state_path, json.dumps(state, indent=2).encode())
+            print(f'Lesson text: {text_count} files available.')
+    except (OSError, ValueError) as exc:
+        print(f'Lesson text export failed ({type(exc).__name__}); rerun to retry.', file=gs.sys.stderr)
+        failed += 1
     sections = []
     for folder in ('Daily Sheets', 'Lesson Plans', 'Newsletters', 'Attachments'):
         entries = {}
@@ -250,7 +371,8 @@ def sync_folder(rows, token, output_dir, refresh=False):
             for filename in record['files'] + record.get('attachments', []):
                 if filename.startswith(folder + '/'):
                     entries[filename] = record['date'] + ' — ' + (
-                        'Lessons' if folder == 'Lesson Plans' else record['title'])
+                        ('Lessons (' + Path(filename).suffix[1:].upper() + ')')
+                        if folder == 'Lesson Plans' else record['title'])
                     if folder == 'Attachments':
                         entries[filename] = Path(filename).name.split('-', 1)[-1]
         links = ''.join('<li><a href="' + quote(f) + '">' + html.escape(label) + '</a></li>'
@@ -265,7 +387,7 @@ def cmd_documents(args):
     cfg = gs.load_config(args.config)
     if not cfg.get('token'):
         print('Run login first.', file=gs.sys.stderr)
-        return 1
+        return 2
     results = gs.fetch_feed(cfg['token'])
     rows = [r for r in results if r.get('type') in DOCUMENT_TYPES]
     print(f"Found {sum(r['type'] in ('dailysheet', 'dailynote') for r in rows)} daily sheets, "

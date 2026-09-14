@@ -228,7 +228,7 @@ class TestUploadStudentFiltering(unittest.TestCase):
     def test_album_flags_without_student_are_rejected(self):
         with patch.object(gs, "load_config", return_value=self._cfg(self.tmp)), \
              patch.object(gs, "_import_gphotos", return_value=FakeGP()):
-            rc = gs.cmd_upload(self._args(album="Custom Album"))
+            rc = gs.cmd_upload(self._args(mode="album", album="Custom Album"))
         self.assertEqual(rc, 2)
 
     def test_album_flag_with_student_is_used(self):
@@ -237,7 +237,7 @@ class TestUploadStudentFiltering(unittest.TestCase):
         with patch.object(gs, "load_config", return_value=self._cfg(self.tmp)), \
              patch.object(gs, "_import_gphotos", return_value=fake_gp), \
              patch.object(gs, "fetch_feed", return_value=results):
-            rc = gs.cmd_upload(self._args(student="Ada", album="Custom Album"))
+            rc = gs.cmd_upload(self._args(mode="album", student="Ada", album="Custom Album"))
         self.assertEqual(rc, 0)
         self.assertEqual(fake_gp.calls[0]["album_title"], "Custom Album")
 

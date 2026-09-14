@@ -11,6 +11,36 @@ import goddard_documents as docs
 
 
 class DocumentsTest(unittest.TestCase):
+    def test_lesson_text_keeps_paragraphs_and_removes_hidden_content(self):
+        parser = docs.LessonText()
+        parser.feed('<html><head><title>Duplicate</title><style>bad css</style></head>'
+                    '<body><h1>Counting &amp; Shapes</h1><p>Count <b>three</b> blocks.</p>'
+                    '<div hidden><p>Hidden</p></div><script>bad()</script>'
+                    '<p>Line one<br/>Line two</p><ul><li>Circle</li><li>Square</li></ul>'
+                    '<div><span>Math</span><span>Art</span></div></body></html>')
+        text = parser.text()
+        self.assertIn('Counting & Shapes\n\nCount three blocks.', text)
+        self.assertIn('Line one\nLine two', text)
+        self.assertIn('- Circle\n- Square', text)
+        self.assertIn('Math Art', text)
+        for unwanted in ('Duplicate', 'bad css', 'bad()', 'Hidden', '<'):
+            self.assertNotIn(unwanted, text)
+
+    def test_lesson_text_backfill_updates_without_duplicate_entries(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            (root / 'Lesson Plans').mkdir()
+            lesson = root / 'Lesson Plans/lesson.html'
+            lesson.write_text('<html><body><h1>Lessons</h1><p>Count to three.</p></body></html>')
+            state = {'one': {'date': '2026-01-01', 'files': ['Lesson Plans/lesson.html']}}
+            self.assertEqual(docs.export_lesson_text(root, state), 1)
+            self.assertEqual(docs.export_lesson_text(root, state), 1)
+            self.assertEqual(state['one']['files'].count('Lesson Plans/lesson.txt'), 1)
+            lesson.write_text('<html><body><h1>Lessons</h1><p>Count to four.</p></body></html>')
+            docs.export_lesson_text(root, state)
+            self.assertIn('Count to four.', lesson.with_suffix('.txt').read_text())
+            self.assertIn('Count to four.', (root / 'all-lesson-text.txt').read_text())
+
     def test_daily_detail_uses_composite_id(self):
         row = {'type': 'dailysheet', 'dailysheet': {
             'classroom': 'room', 'student': 'child',

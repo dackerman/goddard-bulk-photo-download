@@ -85,12 +85,28 @@ written inside this repo.
 
 Every command accepts `--config PATH` (default
 `~/.config/goddard-photo-sync/config.json`), before or after the subcommand.
+Run `python3 goddard_sync.py --help` for the command list or
+`python3 goddard_sync.py COMMAND --help` for prerequisites, options, and an example.
+Help works without credentials or network access.
+
+`--workers` and `--limit` require positive integers. `drive-upload --prepare-only`
+and `--dry-run` are mutually exclusive; the latter renders local PDFs and checks
+Drive access but does not upload. An explicitly supplied config must exist,
+except when `login` creates it. `login --code` exchanges an existing verification
+code without requesting another one.
+
+Errors go to stderr: exit code **0** means success, **1** an operational failure,
+**2** invalid usage/configuration or missing authentication, and **130** an
+interrupted command. Some Google authorization failures return **1**.
+Use `--debug` before or after any command for a traceback when troubleshooting;
+review it for private data before sharing it.
 
 | Command | What it does | Useful flags |
 |---|---|---|
 | `login` | One-time Kaymbu login; stores the token | `--user`, `--code`, `--output-dir` |
 | `sync` | Download photos/videos and upload to Google Photos; also sync documents to Drive when enabled | `--workers N`, `--quiet`, `--no-upload`, `--no-drive`, `--output-dir` |
 | `documents` | Save offline daily sheets, lesson sections, newsletters, and attachments | `--refresh`, `--output-dir` |
+| `lesson-text` | Extract plain text from saved lesson HTML, without network access | `--output-dir` |
 | `drive-login` | Authorize selected Drive folders using Google Picker | `--no-browser`, `--url-file PATH` |
 | `drive-upload` | Render document PDFs and upload documents/attachments to Drive | `--prepare-only`, `--dry-run` |
 | `status` | Config, token, per-folder counts, Google Photos mode/login/pending | |
@@ -448,6 +464,28 @@ schools instead put their lesson content inside daily sheets and newsletters.
 Document downloads run separately by default; enabling Google Drive sync
 also includes them in `sync` and its existing photo timer.
 They are not uploaded to Google Photos.
+
+### Extract lesson text
+
+Lesson pages already contain text, so OCR is unnecessary. To extract your
+existing archive without downloading it again:
+
+```bash
+python3 goddard_sync.py lesson-text
+```
+
+This creates UTF-8 `.txt` files beside the HTML lesson pages in
+`Documents/Lesson Plans/`, keeping headings, paragraphs, and lists while
+removing HTML, scripts, and styles. It also writes `Documents/all-lesson-text.txt`
+as a combined local file for search or analysis. The combined file follows
+chronological order and preserves repeated lesson content on different dates.
+
+The regular `documents` command also generates or refreshes these text files,
+including backfilling previously downloaded lesson pages. Individual `.txt`
+files are included in the next Drive upload alongside their PDFs; the combined
+file stays local. Run `drive-upload` to upload them immediately, or let the
+existing scheduled sync do it. This extracts saved HTML lesson pages; it does
+not perform OCR on image-only attachments or extract text from standalone PDFs.
 
 ## Sync documents to Google Drive
 

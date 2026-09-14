@@ -58,11 +58,21 @@ STATE_FILENAME = ".goddard-state.json"
 
 
 # --- Config ----------------------------------------------------------------
+class ConfigError(ValueError):
+    """Invalid user configuration, safe to display without a traceback."""
+
+
 def load_config(path: str) -> dict:
+    path = os.path.expanduser(path)
     cfg = {}
     if os.path.exists(path):
-        with open(path) as f:
-            cfg = json.load(f)
+        try:
+            with open(path) as f:
+                cfg = json.load(f)
+        except json.JSONDecodeError as exc:
+            raise ConfigError(f"Invalid JSON in {path}, line {exc.lineno}, column {exc.colno}; fix the config file.") from exc
+        if not isinstance(cfg, dict):
+            raise ConfigError(f"Config {path} must contain a JSON object.")
     # environment overrides (handy for CI / containers)
     for key, env in (("username", "GODDARD_USERNAME"),
                      ("token", "GODDARD_TOKEN"),
@@ -80,8 +90,10 @@ def load_config(path: str) -> dict:
         if os.environ.get(env):
             cfg[key] = os.environ[env]
     if os.environ.get("GODDARD_PER_STUDENT") is not None:
-        cfg["per_student"] = os.environ["GODDARD_PER_STUDENT"].strip().lower() in (
-            "1", "true", "yes", "on")
+        value = os.environ["GODDARD_PER_STUDENT"].strip().lower()
+        if value not in ("1", "true", "yes", "on", "0", "false", "no", "off"):
+            raise ConfigError("GODDARD_PER_STUDENT must be true or false.")
+        cfg["per_student"] = value in ("1", "true", "yes", "on")
     cfg.setdefault("client_id", DEFAULT_CLIENT_ID)
     cfg.setdefault("client_secret", DEFAULT_CLIENT_SECRET)
     cfg.setdefault("output_dir", "~/Pictures/Goddard")
@@ -90,10 +102,35 @@ def load_config(path: str) -> dict:
     cfg.setdefault("gphotos_mode", "off")
     cfg.setdefault("gphotos_album", "Goddard")
     cfg.setdefault("per_student", False)
+    for key in ("per_student", "gdrive_sync_enabled"):
+        if key in cfg and not isinstance(cfg[key], bool):
+            raise ConfigError(f"Config '{key}' must be a JSON boolean (true or false).")
+    for key in ("username", "token", "output_dir", "client_id", "client_secret",
+                "ntfy_topic", "ntfy_server", "gphotos_mode", "gphotos_album",
+                "gphotos_album_id", "gphotos_client_id", "gphotos_client_secret",
+                "gphotos_refresh_token", "gdrive_client_id", "gdrive_client_secret",
+                "gdrive_refresh_token", "gdrive_folder_id", "gdrive_node",
+                "gdrive_node_modules", "gdrive_chromium"):
+        if key in cfg and cfg[key] is not None and not isinstance(cfg[key], str):
+            raise ConfigError(f"Config '{key}' must be a string.")
+    if not cfg.get("output_dir"):
+        raise ConfigError("Config 'output_dir' must be a nonempty path.")
+    if cfg.get("gphotos_mode") not in ("off", "library", "album"):
+        raise ConfigError("Config 'gphotos_mode' must be off, library, or album.")
+    students = cfg.get("students", {})
+    if not isinstance(students, dict):
+        raise ConfigError("Config 'students' must be an object keyed by student ID.")
+    for settings in students.values():
+        if not isinstance(settings, dict):
+            raise ConfigError("Each entry in 'students' must be a JSON object.")
+        for key in ("name", "output_dir", "gphotos_album", "gphotos_album_id", "gdrive_folder_id"):
+            if key in settings and not isinstance(settings[key], str):
+                raise ConfigError(f"Student setting '{key}' must be a string.")
     return cfg
 
 
 def save_config(path: str, cfg: dict) -> None:
+    path = os.path.abspath(os.path.expanduser(path))
     os.makedirs(os.path.dirname(path), exist_ok=True)
     # do not persist defaults for client creds unless explicitly customized
     out = dict(cfg)
@@ -185,9 +222,16 @@ def _fetch_with_retry(url, attempts=5, timeout=120, min_size=1000):
 # --- Auth ------------------------------------------------------------------
 def cmd_login(args):
     cfg = load_config(args.config)
+    if not sys.stdin.isatty() and not (args.user or cfg.get("username")):
+        raise ConfigError("Login requires a phone number or email; supply --user and --code, or run in an interactive terminal.")
     username = args.user or cfg.get("username") or input("Phone or email: ").strip()
-    print(f"Requesting a verification code for {username} ...")
-    _http(f"{API_BASE}/auth/code", "POST", {"username": username})
+    if not username:
+        raise ConfigError("A phone number or email is required; use login --user EMAIL.")
+    if not args.code:
+        if not sys.stdin.isatty():
+            raise ConfigError("Login needs an interactive terminal to request a code; use --user and --code to exchange an existing code.")
+        print(f"Requesting a verification code for {username} ...")
+        _http(f"{API_BASE}/auth/code", "POST", {"username": username})
     code = args.code or input("Enter the code you received: ").strip()
     print("Exchanging code for a token ...")
     resp = _http(AUTH_URL, "POST", {
@@ -196,7 +240,7 @@ def cmd_login(args):
     })
     token = resp.get("access_token")
     if not token:
-        print("Login failed: no access_token in response:", resp, file=sys.stderr)
+        print("Login failed: the server returned no token. Check the verification code and retry login.", file=sys.stderr)
         return 1
     cfg["username"] = username
     cfg["token"] = token
@@ -1084,6 +1128,10 @@ def cmd_upload(args):
         return 2
     cfg = load_config(args.config)
     mode = args.mode or cfg.get("gphotos_mode", "off")
+    if args.student and not cfg.get("per_student"):
+        raise ConfigError("--student requires per_student: true in the config.")
+    if (args.album or args.album_id) and mode != "album":
+        raise ConfigError("--album and --album-id require --mode album.")
     if mode == "off":
         print('gphotos_mode is "off" and no --mode given — nothing to do.')
         return 0
@@ -1175,31 +1223,51 @@ def _upload_per_student(args, cfg, gp, mode):
     return worst
 
 
+def positive_int(value):
+    try:
+        number = int(value)
+    except ValueError:
+        raise argparse.ArgumentTypeError("must be a positive integer") from None
+    if number < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer (at least 1)")
+    return number
+
+
+class CLIParser(argparse.ArgumentParser):
+    def __init__(self, *args, **kwargs):
+        kwargs.setdefault("allow_abbrev", False)
+        super().__init__(*args, **kwargs)
+
+
 def main(argv=None):
     # --config is shared so it works both before and after the subcommand.
     # SUPPRESS (rather than a default) so a subparser's copy of --config can't
     # overwrite a value given before the subcommand; the default is applied
     # after parsing instead.
-    common = argparse.ArgumentParser(add_help=False)
+    common = CLIParser(add_help=False)
     common.add_argument("--config", default=argparse.SUPPRESS,
                         help=f"config file path (default: {DEFAULT_CONFIG})")
 
-    p = argparse.ArgumentParser(
+    common.add_argument("--debug", action="store_true", default=argparse.SUPPRESS,
+                        help="show a traceback on failure (may include private data)")
+
+    p = CLIParser(
         prog="goddard_sync", parents=[common],
-        description="Bulk/incremental photo export for the Goddard Family Hub (Kaymbu) app.")
+        description="Download Goddard photos, videos, daily sheets, and lesson plans; sync to Google Photos and Drive.",
+        epilog="Start: goddard_sync login, then goddard_sync sync. Use COMMAND --help for options and examples.")
     sub = p.add_subparsers(dest="cmd", required=True)
 
     pl = sub.add_parser("login", parents=[common],
                         help="interactive one-time login (stores a token)")
     pl.add_argument("--user", help="phone number or email")
-    pl.add_argument("--code", help="verification code (skip the interactive prompt)")
+    pl.add_argument("--code", help="exchange an existing verification code without requesting a new one")
     pl.add_argument("--output-dir", help="where photos should be saved")
     pl.set_defaults(func=cmd_login)
 
     ps = sub.add_parser("sync", parents=[common],
-                        help="download any new full-resolution photos")
+                        help="download new photos/videos and run configured Google syncs")
     ps.add_argument("--output-dir", help="override the configured output dir")
-    ps.add_argument("--workers", type=int, default=4, help="parallel downloads (default 4)")
+    ps.add_argument("--workers", type=positive_int, default=4, help="parallel downloads (default 4)")
     ps.add_argument("--quiet", action="store_true",
                     help="suppress per-100 progress lines (handy under systemd)")
     ps.add_argument("--no-upload", action="store_true",
@@ -1218,16 +1286,25 @@ def main(argv=None):
         return cmd_documents(args)
     pd.set_defaults(func=run_documents)
 
+    ptext = sub.add_parser("lesson-text", parents=[common],
+                           help="extract plain text from saved lesson pages without network access")
+    ptext.add_argument("--output-dir", help="override the configured output dir")
+    def run_lesson_text(args):
+        from goddard_documents import cmd_lesson_text
+        return cmd_lesson_text(args)
+    ptext.set_defaults(func=run_lesson_text)
+
     for command_name, help_text in (
             ("drive-login", "authorize the configured Google Drive folders"),
             ("drive-upload", "upload document PDFs and attachments to Google Drive")):
         drive_parser = sub.add_parser(command_name, parents=[common], help=help_text)
         if command_name == "drive-login":
-            drive_parser.add_argument("--no-browser", action="store_true")
+            drive_parser.add_argument("--no-browser", action="store_true", help="print the sign-in URL without opening a browser")
             drive_parser.add_argument("--url-file", help="write the sign-in URL to a private local file")
         else:
-            drive_parser.add_argument("--prepare-only", action="store_true", help="render PDFs without accessing Drive")
-            drive_parser.add_argument("--dry-run", action="store_true", help="verify Drive destinations without uploading")
+            drive_modes = drive_parser.add_mutually_exclusive_group()
+            drive_modes.add_argument("--prepare-only", action="store_true", help="render PDFs without accessing Drive")
+            drive_modes.add_argument("--dry-run", action="store_true", help="render local PDFs and verify Drive access; do not upload")
         def run_drive(args):
             from goddard_gdrive import command
             return command(args)
@@ -1261,16 +1338,72 @@ def main(argv=None):
     pup.add_argument("--album-id", help="upload straight into this album id (mode \"album\")")
     pup.add_argument("--dry-run", action="store_true",
                      help="show what would be uploaded; no network writes")
-    pup.add_argument("--limit", type=int, help="upload at most N items this run")
-    pup.add_argument("--workers", type=int, default=3, help="parallel byte uploads (default 3)")
+    pup.add_argument("--limit", type=positive_int, help="upload at most N items this run")
+    pup.add_argument("--workers", type=positive_int, default=3, help="parallel byte uploads (default 3)")
     pup.add_argument("--output-dir", help="override the configured output dir")
     pup.add_argument("--student", help="per_student mode: restrict to one child (name or id)")
     pup.set_defaults(func=cmd_upload)
 
+    examples = {
+        "login": "login --user parent@example.com",
+        "sync": "sync --workers 4 --no-upload --no-drive",
+        "documents": "documents --refresh",
+        "lesson-text": "lesson-text",
+        "drive-login": "drive-login --no-browser",
+        "drive-upload": "drive-upload --dry-run",
+        "status": "status",
+        "students": "students",
+        "gphotos-login": "gphotos-login --no-browser",
+        "albums": "albums",
+        "upload": "upload --mode library --dry-run --limit 10",
+    }
+    details = {
+        "login": "Requests a verification code interactively and saves a private token. With --code, exchanges an existing code instead.",
+        "sync": "Requires login. Downloads media incrementally; Google Photos and document/Drive sync run when enabled in config.",
+        "documents": "Requires login. Saves HTML, images, attachments, and lesson TXT files under OUTPUT_DIR/Documents. Existing downloads are skipped unless --refresh is given.",
+        "lesson-text": "Requires a local archive from documents. Creates one TXT per lesson HTML and a combined all-lesson-text.txt. No network access or OCR of PDF attachments.",
+        "drive-login": "Requires Google Desktop OAuth credentials and configured destination folder IDs. Opens Google Picker to authorize those folders.",
+        "drive-upload": "Requires a documents archive and Node, Playwright, and Chromium for PDF rendering. Uploads PDFs, lesson TXT files, and attachments incrementally. Run drive-login first for uploads or --dry-run. --prepare-only needs no Google credentials.",
+        "status": "Shows local counts and configuration. Per-student mode also reads the Goddard feed and requires login.",
+        "students": "Requires login. Reads the Goddard feed and shows child IDs, resolved names, output folders, and albums.",
+        "gphotos-login": "Requires a Google Desktop OAuth client. Authorizes uploads in a browser and saves a private refresh token.",
+        "albums": "Requires gphotos-login. Lists albums created by this tool through the Google Photos API.",
+        "upload": "Requires downloaded media; real uploads also require gphotos-login. Uses configured gphotos_mode unless --mode is given. Per-student mode reads the Goddard feed, including during --dry-run. Album options require album mode; --student requires per_student config.",
+    }
+    for action in sub._choices_actions:
+        parser = sub.choices[action.dest]
+        parser.description = action.help + ". " + details[action.dest]
+        parser.epilog = "Example: goddard_sync " + examples[action.dest]
     args = p.parse_args(argv)
-    if not hasattr(args, "config"):
-        args.config = DEFAULT_CONFIG
-    return args.func(args)
+    explicit_config = hasattr(args, "config")
+    args.config = os.path.expanduser(getattr(args, "config", DEFAULT_CONFIG))
+    try:
+        if explicit_config and not os.path.exists(args.config) and args.cmd != "login":
+            raise ConfigError(f"Config file not found: {args.config}. Check --config or create it with login.")
+        return args.func(args)
+    except KeyboardInterrupt:
+        print("Interrupted. Rerun the command to resume.", file=sys.stderr)
+        return 130
+    except Exception as exc:
+        if getattr(args, "debug", False):
+            import traceback
+            traceback.print_exc()
+        if isinstance(exc, ConfigError):
+            message = str(exc)
+        elif isinstance(exc, json.JSONDecodeError):
+            message = "A saved state file or server response contains invalid JSON; use --debug to locate it. Preserve state files before repairing them."
+        elif isinstance(exc, urllib.error.HTTPError):
+            message = f"Server returned HTTP {exc.code}; check authentication and retry. Use login for Goddard or the relevant Google login command."
+        elif isinstance(exc, (urllib.error.URLError, TimeoutError)):
+            message = "Network request failed; check your connection and retry."
+        elif isinstance(exc, OSError):
+            message = f"{exc.strerror or type(exc).__name__}: {exc.filename or 'local file or executable'}. Check the path, permissions, and required runtime."
+        elif isinstance(exc, EOFError):
+            message = "Interactive input is unavailable; run in a terminal or supply the command's login options."
+        else:
+            message = f"{type(exc).__name__}: command failed. Rerun with --debug for details."
+        print(f"Error: {message}", file=sys.stderr)
+        return 2 if isinstance(exc, ConfigError) else 1
 
 
 if __name__ == "__main__":

@@ -356,6 +356,10 @@ def upload(args):
     targets = destinations(cfg)
     if not targets:
         raise DriveError('No Drive destination folders configured.')
+    if not args.prepare_only:
+        credentials(cfg)
+        if not cfg.get('gdrive_refresh_token'):
+            raise DriveError('Google Drive is not authorized; run drive-login first.')
     drive = Drive(cfg)
     for name, folder, output_dir in targets:
         root, outputs = prepare(cfg, output_dir)
@@ -368,7 +372,8 @@ def upload(args):
 def command(args):
     try:
         return login(args) if args.cmd == 'drive-login' else upload(args)
-    except (DriveError, ValueError, OSError, subprocess.SubprocessError) as exc:
-        print(str(exc) if isinstance(exc, DriveError) else
-              f'Drive sync failed ({type(exc).__name__}); check local files and rerun.', file=sys.stderr)
+    except DriveError as exc:
+        if getattr(args, "debug", False):
+            raise
+        print(f"Error: {exc}", file=sys.stderr)
         return 1

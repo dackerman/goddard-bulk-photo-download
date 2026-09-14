@@ -8,6 +8,7 @@ import time
 import shutil
 import tempfile
 import unittest
+from unittest.mock import patch
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import goddard_sync as gs
@@ -188,7 +189,8 @@ class TestConfigArgPosition(unittest.TestCase):
         orig = gs.cmd_status
         gs.cmd_status = lambda a: captured.setdefault("config", a.config) or 0
         try:
-            gs.main(argv)
+            with patch.object(gs.os.path, "exists", return_value=True):
+                gs.main(argv)
         finally:
             gs.cmd_status = orig
         return captured["config"]
