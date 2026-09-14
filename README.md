@@ -45,6 +45,8 @@ available. `sync` is what you schedule.
 
 - Python 3.9+ (standard library only — no `pip install` needed)
 - A Goddard Family Hub account
+- Optional: Pillow + pillow-heif, only for `tools/import_from_export.py`
+  (see [Limitations](#limitations)); the CLI itself never needs them
 
 ## Setup
 
@@ -70,6 +72,21 @@ written inside this repo.
 ./goddard_sync.py status
 ```
 
+### Command reference
+
+Every command accepts `--config PATH` (default
+`~/.config/goddard-photo-sync/config.json`), before or after the subcommand.
+
+| Command | What it does | Useful flags |
+|---|---|---|
+| `login` | One-time Kaymbu login; stores the token | `--user`, `--code`, `--output-dir` |
+| `sync` | Download new photos/videos, retry upgrades, then upload to Google Photos if enabled | `--workers N`, `--quiet`, `--no-upload`, `--output-dir` |
+| `status` | Config, token, per-folder counts, Google Photos mode/login/pending | |
+| `students` | Table of every child in the feed and how their name/folder/album resolve | |
+| `gphotos-login` | One-time Google OAuth; stores the refresh token | `--client-id`, `--client-secret`, `--no-browser` |
+| `albums` | List the Google Photos albums this tool created | |
+| `upload` | Push pending items to Google Photos (also runs inside `sync`) | `--mode library\|album`, `--album TITLE`, `--album-id ID`, `--student NAME_OR_ID`, `--dry-run`, `--limit N`, `--workers N` |
+
 The first run downloads your entire history (this can be several GB). Files
 are named `YYYY-MM-DD_HHMMSS_<id>.<ext>`, using the capture time converted to
 **your machine's local timezone** (the feed reports UTC, which otherwise
@@ -90,10 +107,11 @@ Sync complete: 3 new, 12 upgraded to full-res, 928 already present, 0 failed. To
 
 - **new** — items not seen before.
 - **upgraded to full-res** — items previously saved at a lower rendition
-  (`_display`/`_thumb`) whose full-resolution original has since become
-  available and was re-downloaded in place of the old file. This runs on
-  *every* sync, so a photo that was archived on day one can be silently
-  upgraded weeks later once it thaws (see Limitations).
+  (`_display`/`_thumb`) whose full-resolution original could be fetched this
+  time and was re-downloaded in place of the old file. This runs on *every*
+  sync. In practice it mostly catches a photo that failed transiently on its
+  first day; an original that Kaymbu has already archived does not come back
+  on its own (see [Limitations](#limitations)).
 - **already present** — everything else: already full-res, a draft graphic (no
   original exists for those), or an archived original that's still
   unavailable (it'll be retried again on the next run).
@@ -125,7 +143,9 @@ don't hand-edit it while a sync is running. It's also designed to be a stable
 extension point: other tools can add their own keys to an item's entry, and
 `sync` never drops keys it doesn't recognize when it rewrites an entry. The
 Google Photos uploader (below) is one such extension: it adds a `"gphotos"`
-key, `{"id", "rendition", "album_id", "at"}`, once an item has been uploaded.
+key, `{"id", "rendition", "album_id", "at"}`, once an item has been uploaded,
+and `tools/import_from_export.py` sets `"source": "export"` on items it
+swapped in.
 
 Progress is checkpointed to this file every ~100 completed
 downloads/upgrades, so an interrupted first-time backfill picks up close to
@@ -200,6 +220,11 @@ Set `ntfy_topic` (and optionally `ntfy_server`) to get a
   rejected, an unexpected error interrupts the sync, or any item failed to
   download. Titled `Goddard sync FAILED` (auth/unexpected errors) or
   `Goddard sync: N failed` (download failures).
+- **Google Photos login expired** — high priority, when the refresh token
+  is rejected; re-run `gphotos-login`.
+- **New student seen, waiting for a name** — high priority, in per-student
+  mode when a child appears in the feed before any daily sheet names them
+  (see [Multiple children](#multiple-children)).
 
 `sync`'s exit code reflects the same thing: `2` for an auth problem
 (re-run `login`), `1` if anything failed to download, `0` otherwise — useful
@@ -384,15 +409,21 @@ it clearly (exit code `2`, and — for `sync` — a high-priority ntfy titled
   covers are recoverable via a separate detail endpoint — see
   [docs/SYNCING_VIDEOS_AND_STORYBOARDS.md](docs/SYNCING_VIDEOS_AND_STORYBOARDS.md)
   for the method if you want to add that too.
-- **Older originals get archived.** Kaymbu lifecycles some full-resolution
-  originals into AWS Glacier Deep Archive. Downloading one returns
-  `403 InvalidObjectState`, so `sync` saves the next-best `_display` rendition
-  (~1080px) instead — note that a `HEAD` request on an archived original can
-  still succeed with the real file size even though the actual download
-  (`GET`) 403s, since S3 serves cached metadata without needing a restore.
-  `sync`'s upgrade pass revisits every non-full-res item on each run and
-  swaps in the original automatically once/if it becomes fetchable again, with
-  no need to re-run anything manually.
+- **Originals get archived, so sync promptly.** Kaymbu moves every
+  full-resolution original into AWS Glacier Deep Archive (the CDN reports
+  `x-amz-storage-class: DEEP_ARCHIVE` on all of them). A download then
+  returns `403 InvalidObjectState`, and the app itself is served only the
+  `_display` copy (~1024px) for such photos — its detail endpoint points
+  `originalFile` at `_display.jpg`. The originals you *can* still fetch are
+  the ones CloudFront happens to have cached, which is why coverage is patchy
+  by date rather than a clean cutoff. Only the bucket owner (Kaymbu) can
+  restore an archived object; no client-side trick works, and a `HEAD` on
+  the original still succeeds (cached metadata), so don't be fooled by it.
+  Practical consequences: run `sync` every day so each day's photos are
+  grabbed while fresh; when an original isn't fetchable `sync` saves the
+  `_display` copy and its upgrade pass retries cheaply on every run, but
+  expect those to stay as they are unless you recover them from an export
+  (next bullet).
 - **Recovering archived originals from an export.** If you ever saved photos
   one at a time from the Goddard app (e.g. into a Google Photos album), those
   saves were the full-resolution originals. `tools/import_from_export.py
